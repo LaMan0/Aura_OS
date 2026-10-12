@@ -1,0 +1,13 @@
+# aura-update.timer — vérification périodique des releases GitHub
+# Toutes les 6 h, avec jitter pour ne pas marteler l'API.
+[Unit]
+Description=AuraOS — vérification périodique des mises à jour
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

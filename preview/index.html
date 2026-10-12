@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AuraOS — Aperçu local</title>
+<style>
+/* ==========================================================================
+   AURAOS — PREVIEW UI (fidèle aux tokens de docs/02-spec-interface-ui.md)
+   ========================================================================== */
+:root{
+  --bg-base:#0B0D12; --bg-elevated:#141926; --bg-raise:#1B2233;
+  --accent-a:#6EE7F9; --accent-b:#A78BFA;
+  --text-primary:#F4F6FB; --text-muted:#9AA3B8;
+  --radius-card:20px; --radius-pill:999px;
+  --motion-fast:140ms; --motion-page:260ms;
+  --ease-page:cubic-bezier(.2,.8,.2,1);
+  --font:'Inter','Segoe UI',system-ui,sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,'Cascadia Mono',Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{overflow-x:hidden}
+body{
+  background:var(--bg-base); color:var(--text-primary);
+  font-family:var(--font); overflow:hidden;
+  background-image:
+    radial-gradient(900px 500px at 85% -10%, rgba(167,139,250,.16), transparent 60%),
+    radial-gradient(800px 500px at -10% 110%, rgba(110,231,249,.12), transparent 60%);
+}
+button{font-family:inherit;cursor:pointer;border:0;color:inherit;background:none}
+::selection{background:rgba(110,231,249,.3)}
+
+/* --- Mode "lite" (profil merguez : effets coupés, 0 animation) ----------- */
+body.lite *{transition:none !important;animation:none !important}
+body.lite .glass{backdrop-filter:none !important;background:var(--bg-elevated) !important}
+body.lite .orb{display:none}
+
+/* --- Écran de boot ------------------------------------------------------- */
+#boot{
+  position:fixed;inset:0;background:var(--bg-base);z-index:100;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:26px;
+  transition:opacity .5s ease;
+}
+#boot.hide{opacity:0;pointer-events:none}
+.boot-logo{
+  font-size:64px;font-weight:800;letter-spacing:-2px;
+  background:linear-gradient(92deg,var(--accent-a),var(--accent-b));
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.boot-bar{width:220px;height:3px;border-radius:2px;background:#232B3E;overflow:hidden}
+.boot-bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent-a),var(--accent-b));animation:bootfill 1.5s var(--ease-page) forwards}
+@keyframes bootfill{to{width:100%}}
+.boot-sub{color:var(--text-muted);font-size:13px;letter-spacing:.4px}
+
+/* --- Orbes décoratifs ---------------------------------------------------- */
+.orb{position:fixed;border-radius:50%;filter:blur(90px);opacity:.25;pointer-events:none}
+.orb.a{width:520px;height:520px;background:var(--accent-a);top:-190px;right:-120px}
+.orb.b{width:460px;height:460px;background:var(--accent-b);bottom:-200px;left:-140px}
+
+/* --- Structure Gaming ---------------------------------------------------- */
+#gaming{display:flex;flex-direction:column;height:100%;position:relative;z-index:1}
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:18px 34px 10px;
+}
+.brand{font-size:22px;font-weight:800;letter-spacing:-.5px;display:flex;align-items:center;gap:10px}
+.brand .dot{width:11px;height:11px;border-radius:50%;background:linear-gradient(135deg,var(--accent-a),var(--accent-b));box-shadow:0 0 14px rgba(110,231,249,.8)}
+.status{display:flex;align-items:center;gap:12px;font-size:12.5px;color:var(--text-muted)}
+.chip{
+  display:inline-flex;align-items:center;gap:7px;padding:7px 14px;border-radius:var(--radius-pill);
+  background:var(--bg-elevated);border:1px solid #232B3E;font-size:12.5px;color:var(--text-primary);
+}
+.chip .k{color:var(--accent-a);font-family:var(--mono);font-size:11.5px}
+.chip.mono{font-family:var(--mono)}
+
+.stage{flex:1;display:flex;flex-direction:column;justify-content:center;padding:0 34px;min-height:0}
+.view{display:none;animation:viewin var(--motion-page) var(--ease-page)}
+.view.active{display:block}
+@keyframes viewin{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+
+/* --- Carrousel héro ------------------------------------------------------ */
+.hero{display:flex;align-items:center;gap:12px}
+.hero-arrow{
+  width:44px;height:44px;flex:none;border-radius:50%;background:var(--bg-elevated);
+  border:1px solid #232B3E;font-size:18px;color:var(--text-muted);
+  transition:all var(--motion-fast) ease-out;
+}
+.hero-arrow:hover{color:var(--text-primary);border-color:var(--accent-a);transform:scale(1.07)}
+.hero-card{
+  flex:1;min-width:0;display:flex;flex-wrap:wrap;gap:26px;align-items:center;
+  background:var(--bg-elevated);border:1px solid #232B3E;border-radius:26px;
+  padding:28px 32px;min-height:320px;
+}
+.art{
+  width:min(340px,100%);height:260px;flex:none;border-radius:18px;position:relative;overflow:hidden;
+  box-shadow:0 24px 60px rgba(0,0,0,.5);
+}
+.art::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,transparent 55%,rgba(11,13,18,.72))}
+.art .badge{
+  position:absolute;top:14px;left:14px;z-index:2;padding:5px 11px;border-radius:var(--radius-pill);
+  background:rgba(11,13,18,.72);font-size:11px;letter-spacing:.5px;backdrop-filter:blur(6px);
+}
+.hero-info{flex:1;min-width:240px}
+.hero-info h1{font-size:clamp(26px,5vw,44px);line-height:1.06;letter-spacing:-1.2px;margin-bottom:12px}
+.hero-meta{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:18px}
+.hero-desc{color:var(--text-muted);font-size:14.5px;line-height:1.65;max-width:520px;margin-bottom:26px}
+.actions{display:flex;gap:12px;flex-wrap:wrap}
+.btn{
+  padding:13px 26px;border-radius:var(--radius-pill);font-size:14.5px;font-weight:650;
+  transition:all var(--motion-fast) ease-out;display:inline-flex;align-items:center;gap:9px;
+}
+.btn.primary{background:linear-gradient(92deg,var(--accent-a),var(--accent-b));color:#0A0C11;box-shadow:0 10px 30px rgba(110,231,249,.28)}
+.btn.primary:hover{transform:translateY(-2px);box-shadow:0 16px 40px rgba(110,231,249,.4)}
+.btn.ghost{background:var(--bg-raise);border:1px solid #2A3448}
+.btn.ghost:hover{border-color:var(--accent-a);transform:translateY(-2px)}
+.dots{display:flex;gap:8px;justify-content:center;margin-top:22px}
+.dots i{width:8px;height:8px;border-radius:50%;background:#2A3448;transition:all var(--motion-fast);cursor:pointer}
+.dots i.on{width:26px;border-radius:4px;background:linear-gradient(90deg,var(--accent-a),var(--accent-b))}
+
+/* --- Grille bibliothèque ------------------------------------------------- */
+.section-head{display:flex;align-items:baseline;gap:16px;margin-bottom:22px}
+.section-head h2{font-size:28px;letter-spacing:-.8px}
+.section-head .sub{color:var(--text-muted);font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:16px}
+.tile{
+  background:var(--bg-elevated);border:1px solid #232B3E;border-radius:18px;overflow:hidden;
+  transition:all var(--motion-fast) ease-out;cursor:pointer;
+}
+.tile:hover{transform:translateY(-5px);border-color:var(--accent-a)}
+.tile .art{width:100%;height:132px;border-radius:0;box-shadow:none}
+.tile .body{padding:13px 15px 15px}
+.tile h3{font-size:14px;margin-bottom:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile .row{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--text-muted)}
+.src{padding:3px 9px;border-radius:var(--radius-pill);background:var(--bg-raise);font-size:10.5px;letter-spacing:.4px}
+
+/* --- Système ------------------------------------------------------------- */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px}
+.glass{
+  background:rgba(20,25,38,.72);border:1px solid #232B3E;border-radius:var(--radius-card);
+  padding:24px 26px;backdrop-filter:blur(14px);
+}
+.glass h3{font-size:17px;margin-bottom:16px;display:flex;align-items:center;gap:10px}
+.seg{display:flex;gap:8px;margin:14px 0 6px}
+.seg button{
+  flex:1;padding:11px 8px;border-radius:13px;background:var(--bg-raise);
+  border:1px solid #2A3448;font-size:12.5px;font-weight:600;color:var(--text-muted);
+  transition:all var(--motion-fast) ease-out;
+}
+.seg button.on{background:linear-gradient(92deg,rgba(110,231,249,.18),rgba(167,139,250,.22));border-color:var(--accent-a);color:var(--text-primary)}
+.kv{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #20283A;font-size:13px}
+.kv:last-child{border-bottom:0}
+.kv .v{font-family:var(--mono);color:var(--accent-a);font-size:12px}
+.progress{height:8px;border-radius:4px;background:#222B3D;overflow:hidden;margin:14px 0 8px}
+.progress i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent-a),var(--accent-b));transition:width .35s linear}
+.note{color:var(--text-muted);font-size:12px;line-height:1.6}
+
+/* --- Dock bas ------------------------------------------------------------ */
+.dockbar{
+  display:flex;justify-content:center;gap:10px;padding:16px 34px 20px;
+}
+.dock-item{
+  display:flex;align-items:center;gap:10px;padding:12px 22px;border-radius:var(--radius-pill);
+  background:var(--bg-elevated);border:1px solid #232B3E;font-size:13.5px;font-weight:600;
+  color:var(--text-muted);transition:all var(--motion-fast) ease-out;
+}
+.dock-item:hover{color:var(--text-primary);transform:translateY(-3px)}
+.dock-item.on{background:linear-gradient(92deg,rgba(110,231,249,.16),rgba(167,139,250,.2));border-color:var(--accent-a);color:var(--text-primary)}
+.hints{
+  text-align:center;color:#5B6580;font-size:11.5px;letter-spacing:.3px;padding-bottom:14px;
+}
+.hints b{color:var(--text-muted);font-weight:600}
+
+/* --- Overlay lancement de jeu -------------------------------------------- */
+#overlay{
+  position:fixed;inset:0;background:rgba(11,13,18,.72);backdrop-filter:blur(10px);
+  display:none;align-items:center;justify-content:center;z-index:60;
+}
+#overlay.show{display:flex}
+.launch{
+  width:560px;background:var(--bg-elevated);border:1px solid #2A3448;border-radius:24px;
+  padding:32px 34px;animation:viewin var(--motion-page) var(--ease-page);
+}
+.launch h2{font-size:24px;letter-spacing:-.6px;margin-bottom:6px}
+.launch .route{color:var(--text-muted);font-size:13px;margin-bottom:20px}
+.fps-meter{
+  display:flex;align-items:baseline;gap:12px;margin:18px 0 4px;
+}
+.fps-meter .n{font-family:var(--mono);font-size:52px;font-weight:700;
+  background:linear-gradient(92deg,var(--accent-a),var(--accent-b));
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.fps-meter .u{color:var(--text-muted);font-size:14px}
+.bars{display:flex;gap:5px;height:44px;align-items:flex-end;margin:10px 0 20px}
+.bars i{flex:1;background:linear-gradient(180deg,var(--accent-a),rgba(167,139,250,.5));border-radius:3px;transition:height .18s linear}
+
+/* --- Toast --------------------------------------------------------------- */
+#toast{
+  position:fixed;bottom:30px;left:50%;transform:translate(-50%,20px);opacity:0;
+  background:var(--bg-raise);border:1px solid var(--accent-a);color:var(--text-primary);
+  padding:13px 22px;border-radius:var(--radius-pill);font-size:13px;z-index:90;
+  transition:all var(--motion-page) var(--ease-page);pointer-events:none;
+}
+#toast.show{opacity:1;transform:translate(-50%,0)}
+
+/* --- Mode Bureau (XFCE customisé) ---------------------------------------- */
+#desktop{display:none;height:100%;flex-direction:column;
+  background:
+    radial-gradient(1100px 620px at 78% 12%, rgba(167,139,250,.24), transparent 58%),
+    radial-gradient(900px 620px at 12% 96%, rgba(110,231,249,.18), transparent 58%),
+    #0D1017;}
+#desktop.show{display:flex}
+.dpanel{
+  height:44px;flex:none;display:flex;align-items:center;justify-content:space-between;
+  padding:0 18px;background:rgba(13,16,23,.92);border-bottom:1px solid #222B3D;font-size:12.5px;
+}
+.dpanel .left,.dpanel .right{display:flex;align-items:center;gap:16px}
+.dmenu{padding:7px 15px;border-radius:9px;background:var(--bg-raise);font-weight:650;cursor:pointer}
+.dmenu:hover{border:1px solid var(--accent-a)}
+.dbody{flex:1;position:relative;padding:26px}
+.dicons{display:flex;flex-direction:column;gap:20px;width:92px}
+.dicon{
+  display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px 6px;border-radius:13px;
+  font-size:11.5px;cursor:pointer;transition:background var(--motion-fast);
+}
+.dicon:hover{background:rgba(110,231,249,.12)}
+.dicon .glyph{
+  width:46px;height:46px;border-radius:13px;display:flex;align-items:center;justify-content:center;
+  font-size:21px;background:linear-gradient(135deg,#222B3D,#1A2130);border:1px solid #2A3448;
+}
+.dwindow{
+  position:absolute;top:44px;left:150px;right:340px;bottom:110px;min-width:0;
+  background:rgba(20,25,38,.96);border:1px solid #2A3448;border-radius:13px;overflow:hidden;
+  box-shadow:0 30px 80px rgba(0,0,0,.55);display:flex;flex-direction:column;
+}
+.dwtitle{
+  display:flex;align-items:center;justify-content:space-between;padding:11px 15px;
+  background:#171E2C;font-size:12.5px;font-weight:650;border-bottom:1px solid #232B3E;
+}
+.dwc{flex:1;display:flex;min-height:0}
+.dwside{width:172px;border-right:1px solid #232B3E;padding:13px 10px;font-size:12px;color:var(--text-muted)}
+.dwside div{padding:8px 11px;border-radius:8px;margin-bottom:3px;cursor:pointer}
+.dwside div:hover,.dwside div.on{background:rgba(110,231,249,.12);color:var(--text-primary)}
+.dwmain{flex:1;padding:16px;display:grid;grid-template-columns:repeat(4,1fr);gap:11px;align-content:start}
+.folder{
+  padding:14px 8px;border-radius:11px;text-align:center;font-size:11px;color:var(--text-muted);
+  cursor:pointer;border:1px solid transparent;
+}
+.folder:hover{border-color:#2A3448;background:rgba(110,231,249,.08);color:var(--text-primary)}
+.folder .g{font-size:24px;display:block;margin-bottom:7px}
+.ddock{
+  position:absolute;bottom:24px;left:50%;transform:translateX(-50%);
+  display:flex;gap:12px;padding:11px 16px;border-radius:19px;
+  background:rgba(20,25,38,.9);border:1px solid #2A3448;backdrop-filter:blur(12px);
+}
+.ddock .app{
+  width:50px;height:50px;border-radius:14px;display:flex;align-items:center;justify-content:center;
+  font-size:22px;background:linear-gradient(135deg,#232B3D,#1A2130);cursor:pointer;
+  transition:transform var(--motion-fast) ease-out;border:1px solid #2A3448;
+}
+.ddock .app:hover{transform:translateY(-7px) scale(1.08);border-color:var(--accent-a)}
+.back-gaming{
+  position:absolute;top:22px;right:24px;padding:11px 20px;border-radius:var(--radius-pill);
+  background:linear-gradient(92deg,var(--accent-a),var(--accent-b));color:#0A0C11;font-weight:700;font-size:12.5px;
+}
+
+/* --- Adaptation aux petits viewports (DOIT rester en fin de feuille) ----- */
+@media (max-width:900px){
+  .topbar{padding:14px 18px 8px}
+  .stage{padding:0 18px;overflow-y:auto}
+  .hero-card{flex-direction:column;align-items:stretch;padding:22px;min-height:0}
+  .hero-card .art{width:100%;height:190px}
+  .hero-desc{margin-bottom:18px}
+  .dockbar{flex-wrap:wrap;padding:12px 18px 14px}
+  .dock-item{padding:10px 16px;font-size:12.5px}
+  .status .chip:nth-child(2){display:none}
+  .dwindow{left:120px;right:16px}
+}
+@media (max-width:560px){
+  .hero-arrow{display:none}
+  .hero-meta .chip:nth-child(n+3){display:none}
+  .dicons{display:none}
+  .dwindow{left:16px;right:16px}
+  .dpanel div:nth-child(2){display:none}
+}
+</style>
+</head>
+<body class="mode-gaming">
+
+<!-- ===================== ÉCRAN DE BOOT ===================== -->
+<div id="boot">
+  <div class="boot-logo">AuraOS</div>
+  <div class="boot-bar"><i></i></div>
+  <div class="boot-sub">mode gaming · profile auto · presser une touche pour passer</div>
+</div>
+
+<div class="orb a"></div><div class="orb b"></div>
+
+<!-- ===================== MODE GAMING ===================== -->
+<div id="gaming">
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span>AURA<span style="color:var(--text-muted);font-weight:500">OS</span></div>
+    <div class="status">
+      <span class="chip" id="chip-profile">⚡ profil <b class="k" id="profile-name">high</b></span>
+      <span class="chip mono">🖥 <span id="hz">144</span> Hz</span>
+      <span class="chip mono" id="clock">--:--</span>
+    </div>
+  </header>
+
+  <div class="stage">
+    <!-- ACCUEIL -->
+    <section class="view active" id="view-accueil">
+      <div class="hero">
+        <button class="hero-arrow" onclick="slide(-1)">◀</button>
+        <div class="hero-card">
+          <div class="art" id="hero-art"><span class="badge" id="hero-src">STEAM · PROTON-GE</span></div>
+          <div class="hero-info">
+            <h1 id="hero-title">Neon Drift</h1>
+            <div class="hero-meta" id="hero-meta"></div>
+            <p class="hero-desc" id="hero-desc"></p>
+            <div class="actions">
+              <button class="btn primary" onclick="launch()">▶&nbsp; JOUER</button>
+              <button class="btn ghost" onclick="toast('Détails du jeu : profil de compatibilité épinglé')">DÉTAILS</button>
+              <button class="btn ghost" onclick="toast('Assistant « Ajouter un jeu » : scan des fichiers .exe / ROM')">＋ AJOUTER UN JEU</button>
+            </div>
+          </div>
+        </div>
+        <button class="hero-arrow" onclick="slide(1)">▶</button>
+      </div>
+      <div class="dots" id="dots"></div>
+    </section>
+
+    <!-- BIBLIOTHÈQUE -->
+    <section class="view" id="view-bibliotheque">
+      <div class="section-head"><h2>Bibliothèque</h2><span class="sub">5 jeux · sources agrégées : Steam · Epic · GOG · fichiers · émulateurs</span></div>
+      <div class="grid" id="grid"></div>
+    </section>
+
+    <!-- FAVORIS -->
+    <section class="view" id="view-favoris">
+      <div class="section-head"><h2>Favoris</h2><span class="sub">vos jeux épinglés</span></div>
+      <div class="grid" id="grid-fav"></div>
+    </section>
+
+    <!-- SYSTÈME -->
+    <section class="view" id="view-systeme">
+      <div class="section-head"><h2>Système</h2><span class="sub">mises à jour · performance · écran</span></div>
+      <div class="cards">
+        <div class="glass">
+          <h3>⚡ Profil de performance <span class="chip" style="margin-left:auto">aura-perf-detect</span></h3>
+          <p class="note">Le profiler matériel sélectionne automatiquement le profil. Changez-le ici pour voir l'UI s'adapter en direct (comme le fait <b>aura-perf-detect apply</b>).</p>
+          <div class="seg" id="seg-profile">
+            <button onclick="setProfile('merguez')">MERGUEZ<br><small style="color:#6B7590">plancher 30 FPS</small></button>
+            <button onclick="setProfile('mid')">MID<br><small style="color:#6B7590">60–120 FPS</small></button>
+            <button class="on" onclick="setProfile('high')">HIGH<br><small style="color:#6B7590">144+ FPS</small></button>
+          </div>
+          <div class="kv"><span>Effets UI / animations</span><span class="v" id="kv-fx">full</span></div>
+          <div class="kv"><span>Résolution interne</span><span class="v" id="kv-res">native</span></div>
+          <div class="kv"><span>Cap FPS</span><span class="v" id="kv-cap">0 (libre)</span></div>
+          <div class="kv"><span>zRAM</span><span class="v" id="kv-zram">12 % · zstd</span></div>
+        </div>
+        <div class="glass">
+          <h3>🔄 Mise à jour</h3>
+          <div class="kv"><span>Version installée</span><span class="v">v1.1.0 (slot A)</span></div>
+          <div class="kv"><span>Dernière release GitHub</span><span class="v">v1.2.0</span></div>
+          <div class="kv"><span>Téléchargement</span><span class="v">delta zsync · 210 Mo</span></div>
+          <div class="kv"><span>Signature</span><span class="v">minisign ✓</span></div>
+          <div class="progress"><i id="upd-bar"></i></div>
+          <div class="actions"><button class="btn primary" id="upd-btn" onclick="runUpdate()">METTRE À JOUR</button></div>
+          <p class="note" id="upd-note" style="margin-top:12px">Application sur le slot inactif (root B), rollback automatique si le boot échoue (boot counting ×3).</p>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <nav class="dockbar">
+    <button class="dock-item on" data-view="accueil" onclick="go('accueil',this)">🎮 Accueil</button>
+    <button class="dock-item" data-view="bibliotheque" onclick="go('bibliotheque',this)">📚 Bibliothèque</button>
+    <button class="dock-item" data-view="favoris" onclick="go('favoris',this)">⭐ Favoris</button>
+    <button class="dock-item" data-view="systeme" onclick="go('systeme',this)">⚙ Système</button>
+    <button class="dock-item" onclick="toDesktop()">💻 Bureau</button>
+  </nav>
+  <div class="hints">
+    <b>◀ ▶</b> carrousel &nbsp;·&nbsp; <b>Entrée</b> jouer &nbsp;·&nbsp; <b>B</b> bureau &nbsp;·&nbsp; <b>Échap</b> retour &nbsp;·&nbsp; <b>1–4</b> vues &nbsp;·&nbsp; <b>P</b> cycle profil
+  </div>
+</div>
+
+<!-- ===================== OVERLAY LANCEMENT ===================== -->
+<div id="overlay">
+  <div class="launch">
+    <h2 id="launch-title">Neon Drift</h2>
+    <div class="route" id="launch-route"></div>
+    <div class="fps-meter"><span class="n" id="fps-n">144</span><span class="u">FPS · game-mode actif</span></div>
+    <div class="bars" id="bars"></div>
+    <div class="kv"><span>CPU governor</span><span class="v">performance · turbo ON</span></div>
+    <div class="kv"><span>Cgroup</span><span class="v">game.slice · cpu.weight 200</span></div>
+    <div class="kv"><span>Tâches de fond</span><span class="v">background.slice gelé</span></div>
+    <div class="actions" style="margin-top:22px">
+      <button class="btn primary" onclick="closeOverlay()">QUITTER LE JEU</button>
+      <button class="btn ghost" onclick="closeOverlay();toDesktop()">BUREAU</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<!-- ===================== MODE BUREAU ===================== -->
+<div id="desktop">
+  <div class="dpanel">
+    <div class="left">
+      <div class="dmenu">☰ Applications</div>
+      <span style="color:var(--text-muted)">Fichiers</span>
+      <span style="color:var(--text-muted)">Firefox</span>
+    </div>
+    <div> AuraOS Bureau — XFCE </div>
+    <div class="right">
+      <span style="color:var(--text-muted)">🔊</span>
+      <span style="color:var(--text-muted)">📶</span>
+      <span class="chip mono" id="clock2">--:--</span>
+    </div>
+  </div>
+  <div class="dbody">
+    <div class="dicons">
+      <div class="dicon"><span class="glyph">🎮</span>Mes jeux</div>
+      <div class="dicon"><span class="glyph">📁</span>Accueil</div>
+      <div class="dicon"><span class="glyph">🗑</span>Corbeille</div>
+    </div>
+    <div class="dwindow">
+      <div class="dwtitle"><span>Thunar — /home/gamer</span><span style="color:var(--text-muted)">─ □ ✕</span></div>
+      <div class="dwc">
+        <div class="dwside">
+          <div class="on">🏠 Accueil</div>
+          <div>📁 Jeux</div>
+          <div>⬇ Téléchargements</div>
+          <div>🖥 Bureau</div>
+          <div>💿 Disques</div>
+        </div>
+        <div class="dwmain">
+          <div class="folder"><span class="g">📁</span>Jeux</div>
+          <div class="folder"><span class="g">📁</span>Proton prefixes</div>
+          <div class="folder"><span class="g">📁</span>ROMs</div>
+          <div class="folder"><span class="g">📄</span>perf-profile.conf</div>
+          <div class="folder"><span class="g">📄</span>update.conf</div>
+          <div class="folder"><span class="g">📁</span>Documents</div>
+          <div class="folder"><span class="g">📁</span>Images</div>
+          <div class="folder"><span class="g">🔧</span>aura-settings</div>
+        </div>
+      </div>
+    </div>
+    <div class="ddock">
+      <div class="app" title="LibreWolf">🌐</div>
+      <div class="app" title="Thunar">📁</div>
+      <div class="app" title="LibreOffice">📝</div>
+      <div class="app" title="Aura Settings">⚙</div>
+      <div class="app" title="Terminal">⬛</div>
+    </div>
+    <button class="back-gaming" onclick="toGaming()">🎮 Retour Gaming</button>
+  </div>
+</div>
+
+<script>
+/* ==========================================================================
+   ÉTAT & DONNÉES DE DÉMONSTRATION
+   ========================================================================== */
+const GAMES = [
+  {title:"Neon Drift", src:"STEAM · PROTON-GE", tag:"Course arcade",
+   desc:"Course néon cyberpunk à 240 km/h. Rendu Vulkan via DXVK, résolution interne dynamique, FSR activé sur profil merguez.",
+   g:"linear-gradient(135deg,#22D3EE,#6366F1 55%,#A78BFA)", fps:"144"},
+  {title:"Valley of Ashes", src:"GOG · HEROIC", tag:"RPG open-world",
+   desc:"Un RPG monde ouvert dense. VKD3D-Proton (DirectX 12), préfixe Wine sandboxé, cap FPS appliqué par le profil actif.",
+   g:"linear-gradient(135deg,#F59E0B,#EF4444 55%,#8B5CF6)", fps:"60"},
+  {title:"Starfall Tactics", src:"EPIC · HEROIC", tag:"Stratégie",
+   desc:"Stratégie temps réel massif. Priorité CPU haute via game.slice, gel des tâches de fond pendant les batailles.",
+   g:"linear-gradient(135deg,#10B981,#0EA5E9 55%,#6EE7F9)", fps:"120"},
+  {title:"Retro Arena", src:"ÉMULATEUR · PS2", tag:"Rétro",
+   desc:"Émulateur PCSX2 lancé via l'agenciel (table /usr/share/aura/emulators/map), upscaling x3, shaders CRT.",
+   g:"linear-gradient(135deg,#8B5CF6,#EC4899 55%,#F472B6)", fps:"60"},
+  {title:"Cave Explorer", src:"FICHIER · .EXE", tag:"Aventure",
+   desc:"Exécutable Windows autonome détecté par aura-run → Proton-GE, préfixe isolé, bubblewrap, réseau coupé.",
+   g:"linear-gradient(135deg,#0EA5E9,#14B8A6 55%,#A78BFA)", fps:"30"}
+];
+
+const PROFILES = {
+  merguez:{hz:60,  fps:30, lite:true,  fx:"off (effets coupés)", res:"dynamic:0.50–1.00", cap:"60 (plancher 30)", zram:"50 % · lz4"},
+  mid:    {hz:120, fps:75, lite:false, fx:"on (blur off)",       res:"dynamic:0.75–1.00", cap:"120",             zram:"25 % · zstd"},
+  high:   {hz:144, fps:144,lite:false, fx:"full",                res:"native",           cap:"0 (libre)",       zram:"12 % · zstd"}
+};
+let profile = "high", heroIdx = 0;
+
+/* ========================================================================== */
+const $ = id => document.getElementById(id);
+
+function boot(){
+  setTimeout(()=>$("boot").classList.add("hide"), 1600);
+  renderDots(); renderHero(); renderGrid(); tickClock(); setInterval(tickClock, 1000);
+  for(let i=0;i<14;i++){const b=document.createElement("i");$("bars").appendChild(b);}
+  setInterval(fpsTick, 180);
+}
+document.addEventListener("click", ()=>$("boot").classList.add("hide"), {once:true});
+
+function tickClock(){
+  const t = new Date().toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"});
+  $("clock").textContent = t; $("clock2").textContent = t;
+}
+
+/* --- Carrousel ------------------------------------------------------------ */
+function renderDots(){
+  $("dots").innerHTML = GAMES.map((_,i)=>`<i class="${i===heroIdx?"on":""}" onclick="setHero(${i})"></i>`).join("");
+}
+function renderHero(){
+  const g = GAMES[heroIdx];
+  $("hero-art").style.background = g.g;
+  $("hero-src").textContent = g.src;
+  $("hero-title").textContent = g.title;
+  $("hero-desc").textContent = g.desc;
+  $("hero-meta").innerHTML =
+    `<span class="chip">${g.tag}</span><span class="chip mono">≈ ${g.fps} FPS</span>` +
+    `<span class="chip mono">DXVK_ASYNC=1</span><span class="chip">sandbox bwrap</span>`;
+  renderDots();
+}
+function setHero(i){ heroIdx = (i + GAMES.length) % GAMES.length; renderHero(); }
+function slide(d){ setHero(heroIdx + d); }
+
+/* --- Bibliothèque --------------------------------------------------------- */
+function tile(g, i){
+  return `<div class="tile" onclick="setHero(${i});go('accueil')">
+    <div class="art" style="background:${g.g}"></div>
+    <div class="body">
+      <h3>${g.title}</h3>
+      <div class="row"><span class="src">${g.src.split(" · ")[0]}</span><span>≈ ${g.fps} FPS</span></div>
+    </div></div>`;
+}
+function renderGrid(){
+  $("grid").innerHTML = GAMES.map(tile).join("");
+  $("grid-fav").innerHTML = [GAMES[0], GAMES[3]].map((g)=>tile(g, GAMES.indexOf(g))).join("");
+}
+
+/* --- Navigation ----------------------------------------------------------- */
+function go(view, btn){
+  document.querySelectorAll(".view").forEach(v=>v.classList.remove("active"));
+  $("view-"+view).classList.add("active");
+  document.querySelectorAll(".dock-item").forEach(b=>b.classList.remove("on"));
+  if(btn) btn.classList.add("on");
+  else document.querySelector(`[data-view="${view}"]`)?.classList.add("on");
+}
+
+/* --- Profils de performance (moteur de la preview) ------------------------ */
+function setProfile(p){
+  profile = p;
+  const cfg = PROFILES[p];
+  document.body.classList.toggle("lite", cfg.lite);
+  $("profile-name").textContent = p;
+  $("hz").textContent = cfg.hz;
+  $("kv-fx").textContent = cfg.fx;
+  $("kv-res").textContent = cfg.res;
+  $("kv-cap").textContent = cfg.cap;
+  $("kv-zram").textContent = cfg.zram;
+  document.querySelectorAll("#seg-profile button").forEach((b,i)=>
+    b.classList.toggle("on", ["merguez","mid","high"][i] === p));
+  toast(`Profil « ${p} » appliqué — ${cfg.lite ? "effets UI coupés (règle merguez)" : "effets UI actifs"} · cap FPS : ${cfg.cap}`);
+}
+
+/* --- Lancement de jeu (aura-run + game-mode) ------------------------------ */
+function launch(){
+  const g = GAMES[heroIdx];
+  $("launch-title").textContent = g.title;
+  $("launch-route").textContent =
+    `aura-run → ${g.src} → ${g.src.includes(".EXE") ? "Proton-GE (DXVK + VKD3D-Proton)" : g.src.includes("ÉMULATEUR") ? "émulateur système" : "natif / Proton"} · résolution interne : ${PROFILES[profile].res}`;
+  $("overlay").classList.add("show");
+}
+function closeOverlay(){ $("overlay").classList.remove("show"); }
+function fpsTick(){
+  if(!$("overlay").classList.contains("show")) return;
+  const base = PROFILES[profile].fps;
+  const v = Math.max(1, base + Math.round((Math.random()-0.5) * base*0.12));
+  $("fps-n").textContent = v;
+  document.querySelectorAll("#bars i").forEach(b=>{
+    b.style.height = (25 + Math.random()*75) + "%";
+  });
+}
+
+/* --- Mise à jour 1-clic --------------------------------------------------- */
+let updating = false;
+function runUpdate(){
+  if(updating) return; updating = true;
+  let p = 0;
+  const bar = $("upd-bar"), note = $("upd-note");
+  const t = setInterval(()=>{
+    p += 7 + Math.random()*10;
+    if(p >= 100){
+      p = 100; clearInterval(t);
+      note.innerHTML = "Téléchargement delta vérifié (SHA-256 + minisign ✓) · appliqué sur <b>root B</b> · redémarrage simulé.";
+      toast("Mise à jour v1.2.0 appliquée sur le slot inactif — redémarrage propre simulé");
+      $("upd-btn").textContent = "À JOUR ✓"; updating = false;
+    }
+    bar.style.width = p + "%";
+  }, 260);
+}
+
+/* --- Bascule Gaming ↔ Bureau --------------------------------------------- */
+function toDesktop(){
+  closeOverlay();
+  $("gaming").style.display = "none";
+  $("desktop").classList.add("show");
+}
+function toGaming(){
+  $("desktop").classList.remove("show");
+  $("gaming").style.display = "flex";
+}
+
+/* --- Toast ---------------------------------------------------------------- */
+let toastT;
+function toast(msg){
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastT); toastT = setTimeout(()=>t.classList.remove("show"), 2600);
+}
+
+/* --- Clavier -------------------------------------------------------------- */
+document.addEventListener("keydown", e=>{
+  if(!$("boot").classList.contains("hide")){ $("boot").classList.add("hide"); return; }
+  switch(e.key){
+    case "ArrowLeft":  slide(-1); break;
+    case "ArrowRight": slide(1);  break;
+    case "Enter":      if($("gaming").style.display !== "none" && $("view-accueil").classList.contains("active")) launch(); break;
+    case "Escape":     closeOverlay(); break;
+    case "b": case "B": toDesktop(); break;
+    case "g": case "G": toGaming(); break;
+    case "p": case "P": setProfile(profile === "merguez" ? "mid" : profile === "mid" ? "high" : "merguez"); break;
+    case "1": go("accueil"); break;
+    case "2": go("bibliotheque"); break;
+    case "3": go("favoris"); break;
+    case "4": go("systeme"); break;
+  }
+});
+
+boot();
+</script>
+</body>
+</html>

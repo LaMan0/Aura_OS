@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# =============================================================================
+# aura-run — Lanceur universel de jeux (l'« Agenciel » d'AuraOS)
+# -----------------------------------------------------------------------------
+# Détecte le type d'exécutable et route vers la bonne couche :
+#   ELF natif          → exécution directe (+ gamescope si dispo)
+#   .exe / .msi        → Proton-GE (DXVK / VKD3D-Proton) dans un préfixe sandboxé
+#   .sh                → sandbox bubblewrap
+#   .AppImage          → bubblewrap
+#   ROM                → émulateur du système (table /usr/share/aura/emulators/map)
+#   steam://           → client Steam
+# Le game-mode (aura-perf-detect) est activé automatiquement autour du jeu.
+# =============================================================================
+set -euo pipefail
+
+readonly PROG="aura-run"
+readonly CONF_DIR="${AURA_CONF_DIR:-/etc/aura}"
+readonly PROFILE_CONF="${CONF_DIR}/perf-profile.conf"
+readonly PREFIX_ROOT="${AURA_PREFIX_ROOT:-/var/lib/aura/prefixes}"
+readonly PROTON_ROOT="${AURA_PROTON_ROOT:-/opt/AuraOS/proton}"
+readonly EMU_MAP="${AURA_EMU_MAP:-/usr/share/aura/emulators/map}"
+readonly PERF_DETECT="${AURA_PERF_DETECT:-aura-perf-detect}"
+
+log() { printf '[%s] %s\n' "${PROG}" "$*" >&2; }
+die() { printf '[%s] ERREUR: %s\n' "${PROG}" "$*" >&2; exit 20; }
+
+# --- Lecture du profil de performance courant -------------------------------
+read_perf_conf() {
+  FPS_CAP="${FPS_CAP:-0}"
+  RES_SCALE="${RES_SCALE:-native}"
+  if [[ -r "${PROFILE_CONF}" ]]; then
+    # shellcheck disable=SC1090
+    source "${PROFILE_CONF}"
+    FPS_CAP="${FPS_CAP:-0}"
+    RES_SCALE="${INTERNAL_RES_SCALE:-native}"
+  fi
+  return 0
+}
+
+# --- Table de routage par extension -----------------------------------------
+route_by_extension() {
+  local target="$1" ext
+  ext="${target##*.}"
+  ext="${ext,,}"   # minuscules
+  case "${ext}" in
+    exe|msi)          echo "proton" ;;
+    elf|bin)          echo "native" ;;
+    sh|bash)          echo "sandbox" ;;
+    appimage)         echo "sandbox" ;;
+    zip|7z|rar)       echo "archive" ;;
+    nes|snes|gba|gb|gbc|nds|n64|z64|iso|cue|chd|ps2|ps3|wii|3ds|gen|md|sms|pce|a26|a52|a78|lnx|ngp|ws|wsc|vb|intv|coleco|fbf)
+                      echo "emulator" ;;
+    *)                echo "unknown" ;;
+  esac
+}
+
+# --- Compatibilité : Wine / Proton-GE + DXVK / VKD3D ------------------------
+launch_proton() {
+  local target="$1"
+  local prefix name proton_dir
+  name=$(basename "${target}" | tr ' ' '_')
+  prefix="${PREFIX_ROOT}/${name%.exe}"
+  proton_dir="${PROTON_ROOT}/proton-ge"
+
+  [[ -x "${proton_dir}/proton" ]] || proton_dir="${PROTON_ROOT}/default"
+  [[ -x "${proton_dir}/proton" ]] || die "Proton introuvable dans ${PROTON_ROOT} (installer proton-ge)"
+
+  mkdir -p "${prefix}"
+  log "compatibilité : Proton-GE → ${target}"
+  log "préfixe isolé : ${prefix}"
+
+  export WINEPREFIX="${prefix}"
+  export STEAM_COMPAT_DATA_PATH="${prefix}"
+  export DXVK_ASYNC=1
+  export VKD3D_CONFIG=dxr12          # DirectX 12 → VKD3D-Proton
+  export WINE_FULLSCREEN_FSR=1       # upscale FSR utile au profil merguez
+  [[ "${RES_SCALE}" == dynamic:* ]] && export WINE_FULLSCREEN_FSR_STRENGTH=2
+
+  exec ${WRAP[@]+"${WRAP[@]}"} "${proton_dir}/proton" run "${target}"
+}
+
+# --- Natif ------------------------------------------------------------------
+launch_native() {
+  local target="$1"; shift
+  [[ -x "${target}" ]] || chmod +x "${target}" 2>/dev/null || true
+  log "exécution native : ${target}"
+  exec ${WRAP[@]+"${WRAP[@]}"} "${target}" "$@"
+}
+
+# --- Sandbox bubblewrap (scripts, AppImage, exécutables douteux) ------------
+launch_sandbox() {
+  local target="$1"; shift
+  command -v bwrap >/dev/null 2>&1 || { log "bubblewrap absent → lancement direct"; exec "${target}" "$@"; }
+  local gdir
+  gdir=$(dirname "${target}")
+  log "sandbox bubblewrap : ${target}"
+  exec bwrap \
+    --ro-bind /usr /usr --ro-bind /etc /etc --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+    --bind "${gdir}" "${gdir}" \
+    --bind "${PREFIX_ROOT}" "${PREFIX_ROOT}" \
+    --tmpfs /tmp --dev /dev --proc /proc \
+    --die-with-parent --new-session \
+    "${target}" "$@"
+}
+
+# --- Émulateurs rétro -------------------------------------------------------
+launch_emulator() {
+  local target="$1"
+  local ext="${target##*.}" system emu
+  ext="${ext,,}"
+  [[ -r "${EMU_MAP}" ]] || die "table d'émulateurs absente : ${EMU_MAP}"
+  system=$(awk -F'=' -v e="${ext}" '$1==e {print $2; exit}' "${EMU_MAP}")
+  [[ -n "${system:-}" ]] || die "aucun système connu pour l'extension .${ext}"
+  emu=$(awk -F'=' -v s="${system}" '$1==s {print $2; exit}' "${EMU_MAP}")
+  [[ -n "${emu:-}" ]] || die "aucun émulateur déclaré pour '${system}'"
+  log "émulation ${system} : ${emu}"
+  # ${emu} est volontairement non quoté : il peut contenir des arguments (ex: retroarch -L core)
+  exec ${WRAP[@]+"${WRAP[@]}"} ${emu} "${target}"
+}
+
+# --- Steam ------------------------------------------------------------------
+launch_steam() {
+  local uri="$1"
+  command -v steam >/dev/null 2>&1 || die "client Steam non installé"
+  log "ouverture Steam : ${uri}"
+  exec steam "${uri}"
+}
+
+# --- gamescope : enveloppe du flux graphique selon le profil ----------------
+# Remplit le tableau global WRAP utilisé par les fonctions de lancement.
+WRAP=()
+wrap_gamescope() {
+  command -v gamescope >/dev/null 2>&1 || return 0
+  WRAP=( gamescope )
+  (( FPS_CAP > 0 )) && WRAP+=( -r "${FPS_CAP}" )
+  [[ "${RES_SCALE}" == dynamic:* ]] && WRAP+=( -F fsr )   # upscaling FSR (plancher 30 FPS)
+  [[ "${DISPLAY_HZ:-60}" -ge 100 ]] && WRAP+=( -o 300 )   # sorties rapides (144+ Hz)
+  WRAP+=( -- )
+  log "gamescope : ${WRAP[*]}"
+  return 0
+}
+
+# =============================================================================
+usage() {
+  cat <<EOF
+usage : ${PROG} [--profile P] [--no-gamemode] <jeu|URL|ROM> [args...]
+
+  --profile P        force le profil de performance (merguez|mid|high)
+  --no-gamemode      ne pas basculer le système en game-mode
+  --dry-run          affiche le routage choisi sans lancer
+
+types supportés : ELF natif · .exe/.msi (Proton-GE + DXVK/VKD3D) · .sh/.AppImage
+                  (bubblewrap) · ROM (émulateurs) · steam://
+EOF
+}
+
+main() {
+  local target="" no_gamemode=0 dry=0
+  local extra=()
+  while (( $# )); do
+    case "$1" in
+      --profile)   export AURA_FORCE_PROFILE="$2"; shift ;;
+      --no-gamemode) no_gamemode=1 ;;
+      --dry-run)   dry=1 ;;
+      -h|--help)   usage; return 0 ;;
+      *)           if [[ -z "${target}" ]]; then target="$1"; else extra+=("$1"); fi ;;
+    esac
+    shift
+  done
+  [[ -n "${target}" ]] || { usage; die "aucun jeu fourni"; }
+
+  read_perf_conf
+
+  # Routage
+  local kind
+  if [[ "${target}" == steam://* ]]; then
+    kind="steam"
+  elif [[ -e "${target}" ]]; then
+    kind=$(route_by_extension "${target}")
+    [[ "${kind}" == "unknown" ]] && { file "${target}" | grep -q ELF && kind="native" || kind="sandbox"; }
+  else
+    die "fichier introuvable : ${target}"
+  fi
+  log "routage : ${kind} (profil : ${AURA_FORCE_PROFILE:-${AURA_PROFILE:-auto}}, FPS cap : ${FPS_CAP})"
+
+  (( dry )) && { echo "DRY-RUN → ${kind} : ${target}"; return 0; }
+
+  # Game-mode autour du lancement
+  if (( ! no_gamemode )); then
+    "${PERF_DETECT}" game-start --pid $$ 2>/dev/null || log "game-mode indisponible (non bloquant)"
+    trap '"${PERF_DETECT}" game-end 2>/dev/null || true' EXIT
+  fi
+
+  case "${kind}" in
+    proton)   wrap_gamescope; launch_proton "${target}" ;;
+    native)   wrap_gamescope; launch_native "${target}" ${extra[@]+"${extra[@]}"} ;;
+    sandbox)  launch_sandbox "${target}" ${extra[@]+"${extra[@]}"} ;;
+    emulator) wrap_gamescope; launch_emulator "${target}" ;;
+    steam)    launch_steam "${target}" ;;
+    archive)  die "archive détectée : décompressez le jeu avant lancement" ;;
+    *)        die "type de jeu non géré : ${target}" ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,325 @@
+#!/usr/bin/env bash
+# =============================================================================
+# aura-update — client de mise à jour AuraOS (pipeline GitHub Releases)
+#   check     vérifie si une release plus récente est disponible
+#   download  télécharge l'image (delta zsync si possible, reprise possible)
+#   apply     vérifie (sha256 + minisign) puis applique sur le rootfs A/B
+#   status    affiche l'état machine (state.json)
+#   rollback  bascule vers le slot précédent
+#
+# Codes de sortie : 0 = à jour / succès · 10 = MAJ disponible · 20 = erreur
+# =============================================================================
+set -euo pipefail
+
+readonly PROG="aura-update"
+readonly CONF_UPDATE="${AURA_CONF_DIR:-/etc/aura}/update.conf"
+readonly CONF_AURA="${AURA_CONF_DIR:-/etc/aura}/aura.conf"
+readonly STATE_DIR="${AURA_STATE_DIR:-/var/lib/aura}"
+readonly STATE_FILE="${STATE_DIR}/state.json"
+readonly LOCK_FILE="${STATE_DIR}/update.lock"
+readonly LOG_FILE="${AURA_LOG_FILE:-/var/log/aura-update.log}"
+readonly PUBKEY_DEFAULT="/etc/aura/update.pub"   # clé minisign publique épinglée
+
+# --- Configuration (surchargée par /etc/aura/update.conf) --------------------
+REPO="AuraOS-Project/auraos"
+CHANNEL="stable"                 # stable | beta
+ARCH="x86_64"
+MINISIGN_PUBKEY="${PUBKEY_DEFAULT}"
+API_BASE="https://api.github.com"
+ALLOWED_HOST_RE='^(https://(github\.com|objects\.githubusercontent\.com|api\.github\.com)/|https://.*\.zsync$)'
+
+# -----------------------------------------------------------------------------
+log()  {
+  local msg
+  msg=$(printf '%s [%s] %s' "$(date -u +%FT%TZ)" "${PROG}" "$*")
+  printf '%s\n' "${msg}" >&2
+  printf '%s\n' "${msg}" >> "${LOG_FILE}" 2>/dev/null || true
+  return 0
+}
+die()  { log "ERREUR: $*"; exit 20; }
+need_root() { [[ ${EUID} -eq 0 ]] || die "droits root requis (sudo ${PROG} $*)"; }
+
+load_conf() {
+  # shellcheck disable=SC1090
+  [[ -r "${CONF_UPDATE}" ]] && source "${CONF_UPDATE}"
+  API_URL="${API_BASE}/repos/${REPO}/releases/latest"
+  [[ "${CHANNEL}" == "beta" ]] && API_URL="${API_BASE}/repos/${REPO}/releases"
+  mkdir -p "${STATE_DIR}/updates" 2>/dev/null || true
+  return 0
+}
+
+# --- Petit utilitaire JSON sans jq (fallback si jq absent) -------------------
+json_get() { # json_get <champ>  (sur stdin)
+  local field="$1"
+  if command -v jq >/dev/null 2>&1; then
+    jq -r --arg f "${field}" '.. | objects | select(has($f)) | .[$f] // empty' 2>/dev/null | head -n1
+  else
+    grep -o "\"${field}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -n1 | sed 's/.*:[[:space:]]*"//; s/"$//'
+  fi
+}
+
+state_set() { # state_set <champ> <valeur>
+  local k="$1" v="$2"
+  if command -v jq >/dev/null 2>&1 && [[ -f "${STATE_FILE}" ]]; then
+    jq --arg k "${k}" --arg v "${v}" '. + {($k): $v}' "${STATE_FILE}" > "${STATE_FILE}.tmp" \
+      && mv "${STATE_FILE}.tmp" "${STATE_FILE}"
+  else
+    printf '{\n  "%s": "%s"\n}\n' "${k}" "${v}" > "${STATE_FILE}"
+  fi
+}
+
+current_version() {
+  # version installée : /etc/aura/os-release (AURAOS_VERSION) sinon os-release classique
+  local v=""
+  [[ -r /etc/aura/os-release ]] && v=$(grep -oP '^AURAOS_VERSION=\K.*' /etc/aura/os-release | tr -d '"')
+  [[ -z "${v}" && -r /etc/os-release ]] && v=$(grep -oP '^VERSION_ID=\K.*' /etc/os-release | tr -d '"')
+  printf '%s' "${v:-0.0.0}"
+}
+
+semver_gt() { # semver_gt A B → vrai si A > B (gestion basique -beta.N)
+  [[ "$1" == "$2" ]] && return 1
+  [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]
+}
+
+url_allowed() {
+  local u="$1"
+  [[ "${u}" =~ ${ALLOWED_HOST_RE} ]] || die "URL refusée (hors périmètre de confiance) : ${u}"
+}
+
+# --- État courant des slots A/B ---------------------------------------------
+active_slot() {
+  local root
+  root=$(findmnt -no SOURCE / 2>/dev/null || true)
+  case "${root}" in
+    *rootA*|*root_a*) echo "A" ;;
+    *rootB*|*root_b*) echo "B" ;;
+    *)                echo "${AURA_ACTIVE_SLOT:-A}" ;;
+  esac
+}
+inactive_slot() { [[ "$(active_slot)" == "A" ]] && echo "B" || echo "A"; }
+
+# =============================================================================
+# check : interroge GitHub, compare les versions
+# =============================================================================
+cmd_check() {
+  load_conf
+  local etag_file="${STATE_DIR}/updates/etag" payload http etag_in etag_out latest
+  etag_in=""
+  [[ -r "${etag_file}" ]] && etag_in=$(cat "${etag_file}")
+
+  log "vérification des releases (${REPO}, canal=${CHANNEL})…"
+  http=$(curl -sS -o "${STATE_DIR}/updates/last-release.json" -w '%{http_code}' \
+        -H "Accept: application/vnd.github+json" \
+        -H "User-Agent: ${PROG}/$(current_version)" \
+        ${etag_in:+-H "If-None-Match: ${etag_in}"} \
+        "${API_URL}") || die "impossible de joindre GitHub (http=${http})"
+
+  if [[ "${http}" == "304" ]]; then
+    log "aucune nouvelle release (cache ETag valide)"
+    state_set "status" "up-to-date"
+    return 0
+  fi
+  [[ "${http}" == "200" ]] || die "réponse GitHub inattendue (http=${http})"
+
+  etag_out=$(curl -sSI "${API_URL}" | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"{print $2}')
+  [[ -n "${etag_out}" ]] && printf '%s' "${etag_out}" > "${etag_file}"
+
+  payload="${STATE_DIR}/updates/last-release.json"
+  # Canal beta : /releases renvoie un tableau (le plus récent en premier) ;
+  # canal stable : /releases/latest renvoie directement la dernière release.
+  latest=$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "${payload}" | head -n1 | sed 's/.*"v\{0,1\}//; s/"$//')
+  [[ -n "${latest}" ]] || die "impossible d'extraire tag_name"
+
+  local current
+  current=$(current_version)
+  state_set "latest_version" "${latest}"
+  state_set "installed_version" "${current}"
+
+  if semver_gt "${latest}" "${current}"; then
+    log "mise à jour disponible : v${current} → v${latest}"
+    state_set "status" "update-available"
+    return 10
+  fi
+  log "système à jour (v${current})"
+  state_set "status" "up-to-date"
+  return 0
+}
+
+# =============================================================================
+# download : récupère l'image (delta zsync prioritaire)
+# =============================================================================
+cmd_download() {
+  load_conf
+  local payload="${STATE_DIR}/updates/last-release.json" version asset url dest
+  [[ -r "${payload}" ]] || cmd_check || true   # retour 10 acceptable
+  version=$(state_get "latest_version") || true
+  [[ -n "${version:-}" ]] || die "aucune version cible ; lancez d'abord '${PROG} check'"
+
+  dest="${STATE_DIR}/updates/aura-system-${version}-${ARCH}.sqfs"
+
+  # 1. chercher un delta .zsync puis l'image complète dans les assets
+  url=$(grep -o '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*"' "${payload}" \
+        | sed 's/.*:[[:space:]]*"//; s/"$//' \
+        | grep -E "aura-system-${version}-${ARCH}\.sqfs(\.zsync)?$" \
+        | grep -E '\.zsync$' | head -n1)
+  [[ -z "${url:-}" ]] && url=$(grep -o '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*"' "${payload}" \
+        | sed 's/.*:[[:space:]]*"//; s/"$//' \
+        | grep -E "aura-system-${version}-${ARCH}\.sqfs$" | head -n1)
+  [[ -n "${url:-}" ]] || die "aucun asset système trouvé pour v${version}"
+  url_allowed "${url}"
+
+  state_set "status" "downloading"
+  if [[ "${url}" == *.zsync ]] && command -v zsync >/dev/null 2>&1; then
+    log "téléchargement delta (zsync) : ${url}"
+    ( cd "${STATE_DIR}/updates" && zsync -i "${dest}" -o "${dest}" -u "${url}" )
+  else
+    log "téléchargement complet (reprise possible) : ${url}"
+    curl -fL --retry 5 --retry-delay 15 -C - -o "${dest}" "${url}"
+  fi
+  [[ -s "${dest}" ]] || die "image téléchargée vide"
+  state_set "status" "downloaded"
+  state_set "image_path" "${dest}"
+  log "téléchargement terminé : ${dest}"
+}
+
+state_get() { # state_get <champ>
+  [[ -r "${STATE_FILE}" ]] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    jq -r --arg k "$1" '.[$k] // empty' "${STATE_FILE}"
+  else
+    grep -o "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "${STATE_FILE}" | head -n1 | sed 's/.*:[[:space:]]*"//; s/"$//'
+  fi
+}
+
+# =============================================================================
+# apply : vérification cryptographique + écriture sur le slot inactif
+# =============================================================================
+cmd_apply() {
+  need_root apply
+  load_conf
+  local do_reboot=0
+  [[ "${1:-}" == "--reboot" ]] && do_reboot=1
+
+  local image version sums slot
+  image=$(state_get "image_path") || true
+  version=$(state_get "latest_version") || true
+  [[ -n "${image:-}" && -s "${image}" ]] || die "aucune image prête ; lancez '${PROG} download'"
+  [[ -n "${version:-}" ]] || die "version cible inconnue"
+
+  # Espace disque : au moins 2× la taille de l'image
+  local need avail
+  need=$(( $(stat -c%s "${image}") * 2 ))
+  avail=$(df --output=avail -B1 "${STATE_DIR}" | tail -n1)
+  (( avail >= need )) || die "espace disque insuffisant (${avail} < ${need} octets)"
+
+  # --- Vérification SHA-256 + signature minisign ---
+  log "vérification d'intégrité…"
+  sums="${STATE_DIR}/updates/SHA256SUMS"
+  local sums_url="https://github.com/${REPO}/releases/download/v${version}/SHA256SUMS"
+  url_allowed "${sums_url}"
+  curl -fsSL -o "${sums}" "${sums_url}" 2>/dev/null || true
+  if [[ -s "${sums}" ]]; then
+    ( cd "$(dirname "${image}")" && sha256sum -c --ignore-missing "${sums}" ) \
+      || die "empreinte SHA-256 invalide — mise à jour abandonnée"
+    if command -v minisign >/dev/null 2>&1 && [[ -r "${MINISIGN_PUBKEY}" ]]; then
+      minisign -Vm "${sums}" -p "${MINISIGN_PUBKEY}" -x "${sums}.minisig" 2>/dev/null \
+        || die "signature minisign invalide — mise à jour abandonnée"
+      log "signature vérifiée (minisign)"
+    else
+      die "minisign ou clé publique absente — refus d'appliquer une image non vérifiable"
+    fi
+  else
+    die "SHA256SUMS introuvable — refus d'appliquer"
+  fi
+
+  # --- Application sur le slot inactif (jamais sur le slot actif) ---
+  slot=$(inactive_slot)
+  log "écriture du slot inactif root${slot}…"
+  state_set "status" "applying"
+  local target="/dev/disk/by-partlabel/aura-root${slot}"
+  [[ -e "${target}" ]] || target=$(state_get "root${slot}_device") || die "slot root${slot} introuvable"
+
+  if command -v unsquashfs >/dev/null 2>&1; then
+    mount "${target}" /mnt
+    unsquashfs -f -d /mnt "${image}"
+    umount /mnt
+  else
+    dd if="${image}" of="${target}" bs=4M status=progress conv=fsync
+  fi
+
+  # --- Basculer le bootloader (GRUB) ---
+  log "mise à jour du bootloader (slot actif → root${slot})…"
+  grub-editenv /boot/grub/grubenv set "aura_slot=${slot}" "boot_count=0" 2>/dev/null \
+    || log "avertissement : grubenv non modifiable (config custom ?)"
+  grub-mkconfig -o /boot/grub/grub.cfg >/dev/null 2>&1 || true
+
+  state_set "status" "applied"
+  state_set "pending_slot" "${slot}"
+  log "mise à jour v${version} appliquée sur root${slot}"
+
+  if (( do_reboot )); then
+    log "redémarrage dans 10 s (Ctrl+C pour annuler)"
+    sleep 10
+    systemctl reboot
+  else
+    log "redémarrez pour activer la version v${version} ('${PROG} status' pour l'état)"
+  fi
+}
+
+# =============================================================================
+cmd_rollback() {
+  need_root rollback
+  load_conf
+  local slot
+  slot=$(inactive_slot)
+  log "ROLLBACK manuel vers root${slot}…"
+  grub-editenv /boot/grub/grubenv set "aura_slot=${slot}" "boot_count=0" 2>/dev/null || true
+  grub-mkconfig -o /boot/grub/grub.cfg >/dev/null 2>&1 || true
+  state_set "status" "rolled-back"
+  log "rollback effectué ; redémarrez pour l'activer"
+}
+
+cmd_status() {
+  load_conf
+  echo "=== état de mise à jour AuraOS ==="
+  echo "version installée : $(current_version)"
+  echo "slot actif        : root$(active_slot)"
+  [[ -r "${STATE_FILE}" ]] && cat "${STATE_FILE}"
+  return 0
+}
+
+# =============================================================================
+usage() {
+  cat <<EOF
+usage : ${PROG} <commande> [options]
+
+  check               vérifie les releases GitHub (0 = à jour, 10 = MAJ dispo)
+  download            télécharge l'image (delta zsync, reprise possible)
+  apply [--reboot]    vérifie + applique sur le slot inactif, puis redémarre
+  status              affiche l'état courant
+  rollback            bascule vers le slot précédent
+  -h | --help         cette aide
+EOF
+}
+
+main() {
+  local cmd="${1:-status}"; shift || true
+  case "${cmd}" in
+    check)    cmd_check "$@" ;;
+    download) cmd_download "$@" ;;
+    apply)    cmd_apply "$@" ;;
+    status)   cmd_status "$@" ;;
+    rollback) cmd_rollback "$@" ;;
+    -h|--help|help) usage ;;
+    *) usage; exit 20 ;;
+  esac
+}
+
+# Verrou global anti-exécutions concurrentes (dégradé proprement si flock absent)
+mkdir -p "${STATE_DIR}" 2>/dev/null || true
+if { exec 9> "${LOCK_FILE}"; } 2>/dev/null; then
+  if command -v flock >/dev/null 2>&1; then
+    flock -n 9 || die "une autre instance de ${PROG} est en cours"
+  fi
+fi
+main "$@"

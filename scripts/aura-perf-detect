@@ -1,0 +1,584 @@
+#!/usr/bin/env bash
+# =============================================================================
+# aura-perf-detect — Profiler matériel dynamique d'AuraOS
+# -----------------------------------------------------------------------------
+# Adapte le système entre deux extrêmes :
+#   · PROFIL "merguez" : plancher STRICT de 30 FPS (zRAM agressif, effets UI
+#     coupés, résolution interne dynamique, I/O BFQ, sysctls conservateurs)
+#   · PROFIL "high"    : ZÉRO bridage, 144+ FPS, governor performance,
+#     refresh natif, VRR, cœurs alloués via cgroups v2
+#   · PROFIL "mid"     : équilibre 60-120 FPS
+#
+# Commandes :
+#   detect               analyse le matériel, affiche le profil choisi (--json)
+#   apply [--profile X]  applique le profil (--dry-run = simulation)
+#   game-start [--pid N] bascule en game-mode bas niveau (performance, freeze)
+#   game-end             restaure l'état de repos
+#   status               état courant (profil, governor, game-mode, zram)
+#   restore              restaure les réglages système par défaut
+#
+# Codes de sortie : 0 = OK · 20 = erreur
+# =============================================================================
+set -euo pipefail
+
+readonly PROG="aura-perf-detect"
+readonly CONF_DIR="${AURA_CONF_DIR:-/etc/aura}"
+readonly PROFILE_CONF="${CONF_DIR}/perf-profile.conf"
+readonly RUN_DIR="${AURA_RUN_DIR:-/run/aura}"
+readonly GM_STATE="${RUN_DIR}/gamemode.state"
+
+# -----------------------------------------------------------------------------
+# Journalisation
+# -----------------------------------------------------------------------------
+log()  { printf '[%s] %s\n' "${PROG}" "$*" >&2; }
+warn() { printf '[%s] AVERTISSEMENT: %s\n' "${PROG}" "$*" >&2; }
+die()  { printf '[%s] ERREUR: %s\n' "${PROG}" "$*" >&2; exit 20; }
+
+DRY_RUN=0
+VERBOSE=0
+FORCE_PROFILE=""
+
+run() { # run "description" commande... — exécute sauf en --dry-run
+  local desc="$1"; shift
+  if (( DRY_RUN )); then
+    printf '  [dry-run] %-58s ← %s\n' "$*" "${desc}"
+    return 0
+  fi
+  (( VERBOSE )) && log "action : ${desc}"
+  "$@" || warn "échec (non bloquant) : ${desc}"
+}
+
+need_root() {
+  (( DRY_RUN )) && return 0
+  [[ ${EUID} -eq 0 ]] || die "droits root requis : sudo ${PROG} $*"
+}
+
+# =============================================================================
+# 1. DÉTECTION MATÉRIELLE
+# =============================================================================
+CPU_MODEL="" CPU_CORES=0 CPU_THREADS=0 CPU_MAX_MHZ=0
+RAM_MIB=0 GPU_VENDOR="" GPU_CLASS="unknown" GPU_VRAM_MIB=0 GPU_NAME=""
+STORAGE_CLASS="unknown" DISPLAY_HZ=60
+SCORE=0 PROFILE=""
+
+detect_cpu() {
+  CPU_MODEL=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ *//') \
+    || CPU_MODEL="CPU inconnu"
+  [[ -n "${CPU_MODEL}" ]] || CPU_MODEL="CPU inconnu"
+  CPU_CORES=$(grep -c '^core id' /proc/cpuinfo 2>/dev/null || true)
+  CPU_THREADS=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null || true)
+  CPU_CORES=${CPU_CORES:-0}; CPU_THREADS=${CPU_THREADS:-0}
+  (( CPU_CORES == 0 )) && CPU_CORES=${CPU_THREADS}
+  local khz
+  khz=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null || echo 0)
+  [[ -n "${khz}" ]] || khz=0
+  (( khz == 0 )) && khz=$(awk '/^cpu MHz/{printf "%d", $4*1000; exit}' /proc/cpuinfo 2>/dev/null || echo 0)
+  CPU_MAX_MHZ=$(( khz / 1000 ))
+}
+
+detect_ram() {
+  RAM_MIB=$(awk '/^MemTotal:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)
+  [[ -n "${RAM_MIB}" ]] || RAM_MIB=0
+}
+
+detect_gpu() {
+  local dev vendor
+  for dev in /sys/class/drm/card[0-9]*; do
+    [[ -e "${dev}/device/vendor" ]] || continue
+    vendor=$(cat "${dev}/device/vendor" 2>/dev/null || echo "")
+    case "${vendor}" in
+      0x10de) GPU_VENDOR="nvidia" ;;
+      0x1002) GPU_VENDOR="amd" ;;
+      0x8086) GPU_VENDOR="intel" ;;
+      *)      GPU_VENDOR="autre" ;;
+    esac
+    # VRAM : exposée par amdgpu ; NVIDIA via nvidia-smi ; sinon heuristique IGP
+    GPU_VRAM_MIB=$(awk '{printf "%d", $1/1048576}' "${dev}/device/mem_info_vram_total" 2>/dev/null || echo 0)
+    [[ -n "${GPU_VRAM_MIB}" ]] || GPU_VRAM_MIB=0
+    if (( GPU_VRAM_MIB == 0 )) && command -v nvidia-smi >/dev/null 2>&1; then
+      GPU_VRAM_MIB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 || echo 0)
+      [[ -n "${GPU_VRAM_MIB}" ]] || GPU_VRAM_MIB=0
+    fi
+    GPU_NAME=$(grep -m1 '^DRIVER=' "${dev}/device/uevent" 2>/dev/null | cut -d= -f2 || echo "")
+    break
+  done
+  # Classification : GPU dédié (VRAM ≥ 512 MiB) vs IGP
+  if (( GPU_VRAM_MIB >= 512 )); then
+    GPU_CLASS="discrete"
+  elif [[ "${GPU_VENDOR}" == "intel" && "${GPU_NAME}" != *i915* && -n "${GPU_NAME}" ]]; then
+    GPU_CLASS="discrete"          # Intel Arc expose 0 VRAM sysfs mais est un GPU dédié
+  else
+    GPU_CLASS="igp"
+  fi
+}
+
+detect_storage() {
+  local rootdev rota
+  rootdev=$(findmnt -no SOURCE / 2>/dev/null || echo "")
+  rootdev=${rootdev%%[0-9]*}          # /dev/sda2 → /dev/sda
+  rota=$(lsblk -dno ROTA "${rootdev}" 2>/dev/null | tr -d ' ' || echo 1)
+  [[ -n "${rota}" ]] || rota=1
+  if [[ "${rootdev}" == *nvme* || "${rootdev}" == *mmcblk* ]]; then
+    STORAGE_CLASS="nvme"
+  elif [[ "${rota}" == "0" ]]; then
+    STORAGE_CLASS="ssd"
+  else
+    STORAGE_CLASS="hdd"
+  fi
+}
+
+detect_display() {
+  local hz=0
+  if [[ -n "${WAYLAND_DISPLAY:-}" ]] && command -v wlr-randr >/dev/null 2>&1; then
+    hz=$(wlr-randr 2>/dev/null | grep -oP '\d+(\.\d+)?(?=Hz)' | head -n1 | cut -d. -f1 || echo 0)
+  elif [[ -n "${DISPLAY:-}" ]] && command -v xrandr >/dev/null 2>&1; then
+    hz=$(xrandr 2>/dev/null | grep -oP '\d+(\.\d+)?(?=\*)' | head -n1 | cut -d. -f1 || echo 0)
+  fi
+  DISPLAY_HZ=${hz:-60}
+  [[ -n "${DISPLAY_HZ}" ]] || DISPLAY_HZ=60
+  (( DISPLAY_HZ < 30 )) && DISPLAY_HZ=60
+  return 0
+}
+
+detect_all() {
+  detect_cpu; detect_ram; detect_gpu; detect_storage; detect_display
+}
+
+# =============================================================================
+# 2. SCORING → CHOIX DU PROFIL
+#   score cumulé 0–11 :  ≤3 = merguez · 4-7 = mid · ≥8 = high
+# =============================================================================
+score_hardware() {
+  local s=0
+  # CPU : nombre de threads (0-3)
+  if   (( CPU_THREADS <= 2 )); then s=$(( s + 0 ))
+  elif (( CPU_THREADS <= 4 )); then s=$(( s + 1 ))
+  elif (( CPU_THREADS <= 8 )); then s=$(( s + 2 ))
+  else                              s=$(( s + 3 ))
+  fi
+  # CPU : fréquence (0-2)
+  if   (( CPU_MAX_MHZ < 2500 )); then s=$(( s + 0 ))
+  elif (( CPU_MAX_MHZ < 3500 )); then s=$(( s + 1 ))
+  else                                 s=$(( s + 2 ))
+  fi
+  # RAM (0-3)
+  if   (( RAM_MIB < 4096 )); then s=$(( s + 0 ))
+  elif (( RAM_MIB < 8192 )); then s=$(( s + 1 ))
+  elif (( RAM_MIB < 16384 )); then s=$(( s + 2 ))
+  else                             s=$(( s + 3 ))
+  fi
+  # GPU (0-3)
+  if [[ "${GPU_CLASS}" == "discrete" ]]; then
+    if (( GPU_VRAM_MIB >= 4096 )); then s=$(( s + 3 )); else s=$(( s + 2 )); fi
+  elif [[ "${GPU_CLASS}" == "igp" ]]; then
+    s=$(( s + 0 ))
+  fi
+  # Stockage (0-2)
+  case "${STORAGE_CLASS}" in
+    nvme) s=$(( s + 2 )) ;;
+    ssd)  s=$(( s + 1 )) ;;
+    *)    s=$(( s + 0 )) ;;
+  esac
+
+  SCORE=${s}
+  if   (( SCORE <= 3 )); then PROFILE="merguez"
+  elif (( SCORE <= 7 )); then PROFILE="mid"
+  else                        PROFILE="high"
+  fi
+  [[ -n "${FORCE_PROFILE}" ]] && PROFILE="${FORCE_PROFILE}"
+  return 0
+}
+
+# =============================================================================
+# 3. APPLICATION DES PROFILS
+# =============================================================================
+
+# --- 3.1 zRAM (sécurité mémoire : le plancher 30 FPS vient aussi de là) ------
+apply_zram() {
+  local pct algo prio size_mib
+  case "${PROFILE}" in
+    merguez) pct=50; algo="lz4";  prio=100 ;;
+    mid)     pct=25; algo="zstd"; prio=100 ;;
+    high)    pct=12; algo="zstd"; prio=5   ;;
+    *)       pct=25; algo="zstd"; prio=100 ;;
+  esac
+  size_mib=$(( RAM_MIB * pct / 100 ))
+  if [[ "${PROFILE}" == "merguez" ]] && (( size_mib > 4096 )); then size_mib=4096; fi
+  if [[ "${PROFILE}" == "high" ]] && (( size_mib > 8192 )); then size_mib=8192; fi
+  (( size_mib < 256 )) && size_mib=256
+
+  if [[ -d /sys/block/zram0 ]]; then
+    run "zRAM : reset" sh -c 'echo 1 > /sys/block/zram0/reset'
+    run "zRAM : algorithme ${algo}" sh -c "echo ${algo} > /sys/block/zram0/comp_algorithm"
+    run "zRAM : taille ${size_mib} MiB" sh -c "echo $(( size_mib * 1024 * 1024 )) > /sys/block/zram0/disksize"
+    run "zRAM : swap + priorité ${prio}" sh -c "mkswap /dev/zram0 >/dev/null && swapon -p ${prio} /dev/zram0"
+    log "zRAM configuré : ${size_mib} MiB (${algo}, prio ${prio})"
+  elif command -v zramctl >/dev/null 2>&1; then
+    run "zRAM : zramctl ${size_mib} MiB ${algo}" zramctl --find --size "${size_mib}M" --algorithm "${algo}"
+    log "zRAM configuré : ${size_mib} MiB (${algo})"
+  else
+    warn "zRAM indisponible sur ce système"
+  fi
+}
+
+# --- 3.2 CPU : governor & politique énergie ---------------------------------
+apply_cpu() {
+  local gov epp pol
+  case "${PROFILE}" in
+    merguez) gov="schedutil"; epp="balance_power" ;;
+    mid)     gov="schedutil"; epp="balance_performance" ;;
+    high)    gov="performance"; epp="performance" ;;
+    *)       gov="schedutil"; epp="balance_performance" ;;
+  esac
+  # fallback si schedutil indisponible
+  if ! grep -qw schedutil /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors 2>/dev/null; then
+    [[ "${gov}" == "schedutil" ]] && gov="ondemand"
+  fi
+  for pol in /sys/devices/system/cpu/cpufreq/policy*; do
+    [[ -e "${pol}/scaling_governor" ]] || continue
+    run "CPU governor (${pol##*/}) → ${gov}" sh -c "echo ${gov} > ${pol}/scaling_governor"
+    [[ -e "${pol}/energy_performance_preference" ]] && \
+      run "EPP (${pol##*/}) → ${epp}" sh -c "echo ${epp} > ${pol}/energy_performance_preference"
+  done
+  # Turbo : OFF sur merguez (thermique & autonomie), ON ailleurs
+  if [[ -e /sys/devices/system/cpu/intel_pstate/no_turbo ]]; then
+    if [[ "${PROFILE}" == "merguez" ]]; then
+      run "turbo intel : OFF" sh -c 'echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo'
+    else
+      run "turbo intel : ON" sh -c 'echo 0 > /sys/devices/system/cpu/intel_pstate/no_turbo'
+    fi
+  fi
+  log "CPU : governor=${gov}, epp=${epp}"
+}
+
+# --- 3.3 I/O : ordonnanceur disque -----------------------------------------
+apply_io() {
+  local sched q
+  case "${STORAGE_CLASS}" in
+    hdd)  sched="bfq" ;;
+    ssd)  sched="mq-deadline" ;;
+    nvme) if [[ "${PROFILE}" == "high" ]]; then sched="none"; else sched="mq-deadline"; fi ;;
+    *)    sched="mq-deadline" ;;
+  esac
+  for q in /sys/block/*/queue/scheduler; do
+    [[ -e "${q}" ]] || continue
+    if grep -qw "${sched}" "${q}" 2>/dev/null; then
+      run "I/O scheduler (${q%/queue/scheduler}) → ${sched}" sh -c "echo ${sched} > ${q}"
+    fi
+  done
+}
+
+# --- 3.4 sysctl mémoire (latences d'écriture = micro-freezes) ---------------
+apply_sysctl() {
+  local swappiness dirty_ratio dirty_bg cache_p
+  case "${PROFILE}" in
+    merguez) swappiness=160; dirty_ratio=10; dirty_bg=5;  cache_p=60 ;;
+    mid)     swappiness=100; dirty_ratio=15; dirty_bg=8;  cache_p=100 ;;
+    high)    swappiness=60;  dirty_ratio=20; dirty_bg=10; cache_p=100 ;;
+    *)       swappiness=100; dirty_ratio=15; dirty_bg=8;  cache_p=100 ;;
+  esac
+  run "vm.swappiness=${swappiness}"           sysctl -w "vm.swappiness=${swappiness}"
+  run "vm.dirty_ratio=${dirty_ratio}"         sysctl -w "vm.dirty_ratio=${dirty_ratio}"
+  run "vm.dirty_background_ratio=${dirty_bg}" sysctl -w "vm.dirty_background_ratio=${dirty_bg}"
+  run "vm.vfs_cache_pressure=${cache_p}"      sysctl -w "vm.vfs_cache_pressure=${cache_p}"
+  # MGLRU : réduit drastiquement les stalls sur faible RAM
+  [[ -e /sys/kernel/mm/lru_gen/enabled ]] && \
+    run "MGLRU : activé" sh -c 'echo 1 > /sys/kernel/mm/lru_gen/enabled'
+  return 0
+}
+
+# --- 3.5 Préférences UI consommées par Aura Shell / gamescope ---------------
+#   → /etc/aura/perf-profile.conf (lu au démarrage par l'UI et par aura-run)
+apply_ui_prefs() {
+  local effects anim blur res_scale fps_floor fps_cap refresh vrr
+  case "${PROFILE}" in
+    merguez)
+      effects="off"; anim="off"; blur="off"
+      res_scale="dynamic:0.50-1.00"; fps_floor=30; fps_cap=60
+      refresh="60"; vrr="off" ;;
+    high)
+      effects="full"; anim="full"; blur="on"
+      res_scale="native"; fps_floor=60; fps_cap=0
+      refresh="native"; vrr="adaptive" ;;
+    *) # mid
+      effects="on"; anim="on"; blur="off"
+      res_scale="dynamic:0.75-1.00"; fps_floor=45; fps_cap=120
+      refresh="auto"; vrr="auto" ;;
+  esac
+  local content
+  content=$(cat <<EOF
+# Généré par ${PROG} le $(date -u +%FT%TZ) — NE PAS ÉDITER (écrasé à chaque apply)
+AURA_PROFILE=${PROFILE}
+AURA_SCORE=${SCORE}
+UI_EFFECTS=${effects}
+UI_ANIMATIONS=${anim}
+UI_BLUR=${blur}
+INTERNAL_RES_SCALE=${res_scale}
+FPS_FLOOR=${fps_floor}
+FPS_CAP=${fps_cap}
+REFRESH_CAP=${refresh}
+VRR=${vrr}
+ZRAM=on
+EOF
+)
+  if (( DRY_RUN )); then
+    printf '  [dry-run] écriture de %s :\n' "${PROFILE_CONF}"
+    printf '%s\n' "${content}" | sed 's/^/    /'
+  else
+    mkdir -p "${CONF_DIR}"
+    printf '%s\n' "${content}" > "${PROFILE_CONF}"
+    log "préférences UI écrites : ${PROFILE_CONF}"
+  fi
+}
+
+# --- 3.6 Services de fond (profil merguez : le minimum vital) ---------------
+apply_services() {
+  [[ "${PROFILE}" == "merguez" ]] || return 0
+  local svc
+  for svc in updatedb.timer man-db.timer; do
+    run "service de fond désactivé : ${svc}" systemctl disable --now "${svc}" 2>/dev/null || true
+  done
+}
+
+apply_profile() {
+  log "application du profil '${PROFILE}' (score matériel : ${SCORE}/11)"
+  apply_zram
+  apply_cpu
+  apply_io
+  apply_sysctl
+  apply_ui_prefs
+  apply_services
+  if (( DRY_RUN )); then
+    log "dry-run terminé — aucune modification effectuée"
+  else
+    mkdir -p "${RUN_DIR}"
+    printf '%s\n' "${PROFILE}" > "${RUN_DIR}/active-profile"
+    log "profil '${PROFILE}' appliqué avec succès"
+  fi
+  return 0
+}
+
+# =============================================================================
+# 4. GAME-MODE BAS NIVEAU
+#    game-start : CPU performance + gel des tâches de fond + priorité flux
+#    game-end   : restauration de l'état de repos du profil courant
+# =============================================================================
+CG_ROOT="/sys/fs/cgroup"
+
+game_start() {
+  local pid="${1:-}"
+  need_root game-start
+  if [[ -f "${GM_STATE}" ]]; then warn "game-mode déjà actif"; return 0; fi
+  mkdir -p "${RUN_DIR}"
+
+  log "GAME-MODE : activation (pid jeu : ${pid:-interne})"
+  {
+    echo "profile=${PROFILE}"
+    echo "pid=${pid}"
+    echo "started=$(date -u +%FT%TZ)"
+  } > "${GM_STATE}"
+
+  # 1. CPU sans bride : governor performance + turbo ON
+  local pol
+  for pol in /sys/devices/system/cpu/cpufreq/policy*; do
+    [[ -e "${pol}/scaling_governor" ]] || continue
+    run "game-mode : governor → performance" sh -c "echo performance > ${pol}/scaling_governor"
+    [[ -e "${pol}/energy_performance_preference" ]] && \
+      run "game-mode : EPP → performance" sh -c "echo performance > ${pol}/energy_performance_preference"
+  done
+  [[ -e /sys/devices/system/cpu/intel_pstate/no_turbo ]] && \
+    run "game-mode : turbo → ON" sh -c 'echo 0 > /sys/devices/system/cpu/intel_pstate/no_turbo'
+
+  # 2. cgroups v2 : slice dédiée au jeu, priorité haute
+  if [[ -d "${CG_ROOT}" ]]; then
+    run "game-mode : +cpu +memory +io (cgroup.subtree_control)" \
+        sh -c "echo '+cpu +memory +io' > ${CG_ROOT}/cgroup.subtree_control" || true
+    mkdir -p "${CG_ROOT}/game.slice" 2>/dev/null || true
+    if [[ -d "${CG_ROOT}/game.slice" ]]; then
+      run "game-mode : game.slice cpu.weight=200"  sh -c "echo 200 > ${CG_ROOT}/game.slice/cpu.weight"
+      run "game-mode : game.slice cpu.max=max"     sh -c "echo 'max 100000' > ${CG_ROOT}/game.slice/cpu.max"
+      [[ -d "${CG_ROOT}/system.slice" ]] && \
+        run "game-mode : system.slice cpu.weight=50" sh -c "echo 50 > ${CG_ROOT}/system.slice/cpu.weight"
+    fi
+    # 3. Gel des tâches de fond NON vitales (jamais system.slice entier)
+    if [[ -d "${CG_ROOT}/background.slice" ]]; then
+      run "game-mode : gel de background.slice" sh -c "echo 1 > ${CG_ROOT}/background.slice/cgroup.freeze"
+    fi
+    # 4. Placer le processus de jeu dans game.slice
+    if [[ -n "${pid}" && -d "${CG_ROOT}/game.slice" ]]; then
+      run "game-mode : pid ${pid} → game.slice" sh -c "echo ${pid} > ${CG_ROOT}/game.slice/cgroup.procs"
+      run "game-mode : ionice classe 2 prio 0" ionice -c2 -n0 -p "${pid}" || true
+      renice -n -10 -p "${pid}" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  # 5. sysctls anti-micro-freeze : petites fenêtres d'écriture
+  run "game-mode : vm.dirty_ratio=5"            sysctl -w vm.dirty_ratio=5
+  run "game-mode : vm.dirty_background_ratio=2" sysctl -w vm.dirty_background_ratio=2
+  run "game-mode : kernel.sched_autogroup_enabled=0" sysctl -w kernel.sched_autogroup_enabled=0
+
+  # 6. GPU : fréquence maximale demandée
+  local dpm
+  for dpm in /sys/class/drm/card*/device/pp_dpm_sclk; do
+    [[ -e "${dpm}" ]] || continue
+    run "game-mode : amdgpu pp_dpm_sclk → max" sh -c "echo s 0 > ${dpm}"
+  done
+  command -v nvidia-smi >/dev/null 2>&1 && \
+    run "game-mode : nvidia persistence mode" nvidia-smi -pm 1
+
+  log "GAME-MODE actif — flux graphique prioritaire"
+  return 0
+}
+
+game_end() {
+  need_root game-end
+  if [[ ! -f "${GM_STATE}" ]]; then warn "game-mode non actif"; return 0; fi
+  log "GAME-MODE : désactivation"
+
+  # 1. Dégel des tâches de fond
+  [[ -d "${CG_ROOT}/background.slice" ]] && \
+    run "game-end : dégel de background.slice" sh -c "echo 0 > ${CG_ROOT}/background.slice/cgroup.freeze"
+
+  # 2. Restauration du governor selon le profil actif
+  PROFILE=$(cat "${RUN_DIR}/active-profile" 2>/dev/null || echo "mid")
+  apply_cpu
+
+  # 3. Restauration des sysctls de repos
+  case "${PROFILE}" in
+    merguez) run "game-end : dirty_ratio=10" sysctl -w vm.dirty_ratio=10 ;;
+    high)    run "game-end : dirty_ratio=20" sysctl -w vm.dirty_ratio=20 ;;
+    *)       run "game-end : dirty_ratio=15" sysctl -w vm.dirty_ratio=15 ;;
+  esac
+  run "game-end : sched_autogroup_enabled=1" sysctl -w kernel.sched_autogroup_enabled=1
+
+  rm -f "${GM_STATE}"
+  log "GAME-MODE terminé — retour au profil '${PROFILE}'"
+  return 0
+}
+
+# =============================================================================
+# 5. DIVERS : detect / status / restore
+# =============================================================================
+print_report() {
+  detect_all
+  score_hardware
+  echo "════════════════════════════════════════════════════════════"
+  echo "  AURAOS — rapport matériel (aura-perf-detect)"
+  echo "════════════════════════════════════════════════════════════"
+  printf '  CPU        : %s\n' "${CPU_MODEL:-inconnu}"
+  printf '             : %s cœurs / %s threads @ %s MHz\n' "${CPU_CORES}" "${CPU_THREADS}" "${CPU_MAX_MHZ}"
+  printf '  RAM        : %s MiB\n' "${RAM_MIB}"
+  printf '  GPU        : %s (%s, VRAM ≈ %s MiB)\n' "${GPU_VENDOR:-inconnu}" "${GPU_CLASS}" "${GPU_VRAM_MIB}"
+  printf '  Stockage   : %s\n' "${STORAGE_CLASS}"
+  printf '  Écran      : %s Hz\n' "${DISPLAY_HZ}"
+  echo "────────────────────────────────────────────────────────────"
+  printf '  SCORE      : %s/11\n' "${SCORE}"
+  printf '  PROFIL     : %s\n' "${PROFILE}"
+  case "${PROFILE}" in
+    merguez) echo "             → plancher 30 FPS, effets coupés, zRAM agressif" ;;
+    high)    echo "             → 144+ FPS, ZÉRO bridage, refresh natif" ;;
+    *)       echo "             → 60-120 FPS, effets partiels" ;;
+  esac
+  echo "════════════════════════════════════════════════════════════"
+}
+
+print_report_json() {
+  detect_all
+  score_hardware
+  cat <<EOF
+{
+  "cpu": {"model": "${CPU_MODEL}", "cores": ${CPU_CORES}, "threads": ${CPU_THREADS}, "max_mhz": ${CPU_MAX_MHZ}},
+  "ram_mib": ${RAM_MIB},
+  "gpu": {"vendor": "${GPU_VENDOR}", "class": "${GPU_CLASS}", "vram_mib": ${GPU_VRAM_MIB}},
+  "storage": "${STORAGE_CLASS}",
+  "display_hz": ${DISPLAY_HZ},
+  "score": ${SCORE},
+  "profile": "${PROFILE}"
+}
+EOF
+}
+
+cmd_status() {
+  echo "=== état de performance AuraOS ==="
+  echo "profil actif   : $(cat "${RUN_DIR}/active-profile" 2>/dev/null || echo '(non appliqué)')"
+  if [[ -f "${GM_STATE}" ]]; then echo "game-mode      : ACTIF"; else echo "game-mode      : inactif"; fi
+  echo "governor CPU   : $(cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor 2>/dev/null || echo '?')"
+  echo "swappiness     : $(sysctl -n vm.swappiness 2>/dev/null || echo '?')"
+  echo "zRAM           : $(swapon --show=NAME,SIZE,PRIO --bytes 2>/dev/null | grep zram || echo 'aucun')"
+  if [[ -r "${PROFILE_CONF}" ]]; then echo "--- ${PROFILE_CONF} ---"; cat "${PROFILE_CONF}"; fi
+  return 0
+}
+
+cmd_restore() {
+  need_root restore
+  PROFILE="mid"
+  apply_cpu
+  [[ -d "${CG_ROOT}/background.slice" ]] && \
+    run "restore : dégel background.slice" sh -c "echo 0 > ${CG_ROOT}/background.slice/cgroup.freeze"
+  run "restore : dirty_ratio=20" sysctl -w vm.dirty_ratio=20
+  run "restore : dirty_background_ratio=10" sysctl -w vm.dirty_background_ratio=10
+  rm -f "${GM_STATE}" "${RUN_DIR}/active-profile"
+  log "réglages système restaurés"
+  return 0
+}
+
+# =============================================================================
+usage() {
+  cat <<EOF
+usage : ${PROG} <commande> [options]
+
+commandes :
+  detect [--json]              analyse le matériel et affiche le profil choisi
+  apply [--profile P] [--dry-run]
+                               applique le profil (merguez | mid | high)
+  game-start [--pid PID]       bascule en game-mode bas niveau
+  game-end                     quitte le game-mode
+  status                       état courant
+  restore                      restaure les réglages par défaut
+
+options globales : --verbose · --dry-run · --profile P
+exit : 0 = ok · 20 = erreur
+EOF
+}
+
+main() {
+  local cmd="${1:-status}"
+  shift || true
+  local pid="" rc=0
+  local args=()
+  while (( $# )); do
+    case "$1" in
+      --dry-run)   DRY_RUN=1 ;;
+      --verbose|-v) VERBOSE=1 ;;
+      --json)      args+=("--json") ;;
+      --profile)   FORCE_PROFILE="${2:-}"; shift ;;
+      --profile=*) FORCE_PROFILE="${1#*=}" ;;
+      --pid)       pid="${2:-}"; shift ;;
+      --pid=*)     pid="${1#*=}" ;;
+      -h|--help)   usage; return 0 ;;
+      *)           args+=("$1") ;;
+    esac
+    shift
+  done
+  set -- ${args[@]+"${args[@]}"}
+
+  case "${cmd}" in
+    detect)
+      if [[ "${1:-}" == "--json" ]]; then print_report_json; else print_report; fi ;;
+    apply)
+      detect_all; score_hardware
+      if (( DRY_RUN )); then log "=== SIMULATION (dry-run) — profil '${PROFILE}' ==="; fi
+      need_root apply
+      apply_profile || rc=$?
+      return "${rc}" ;;
+    game-start) game_start "${pid}" ;;
+    game-end)   game_end ;;
+    status)     cmd_status ;;
+    restore)    cmd_restore ;;
+    -h|--help|help) usage ;;
+    *) usage; die "commande inconnue : ${cmd}" ;;
+  esac
+}
+
+mkdir -p "${RUN_DIR}" 2>/dev/null || true
+main "$@"
