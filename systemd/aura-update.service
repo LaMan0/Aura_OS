@@ -1,0 +1,17 @@
+# aura-update.service — vérification et application des mises à jour GitHub
+# Déclenché par aura-update.timer (périodique) ou à la demande depuis l'UI.
+[Unit]
+Description=AuraOS — mise à jour système depuis GitHub Releases
+Documentation=file:///usr/share/doc/aura/03-systeme-mise-a-jour.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/aura/bin/aura-update check
+# Si une MAJ est disponible (code 10), le téléchargement est lancé en différé
+# par l'UI (bouton « Mettre à jour ») via : aura-update apply --reboot
+SuccessExitStatus=10
+TimeoutStartSec=1800
+Nice=10
+IOSchedulingClass=idle

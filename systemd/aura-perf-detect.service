@@ -1,0 +1,22 @@
+# aura-perf-detect.service — application du profil de performance au démarrage
+# Analyse le matériel (CPU/RAM/GPU/stockage/écran) et applique le profil
+# merguez / mid / high : zRAM, governor, I/O, sysctls, préférences UI.
+[Unit]
+Description=AuraOS — détection matérielle et application du profil de performance
+Documentation=file:///usr/share/doc/aura/01-architecture-globale.md
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service
+Before=aura-gaming.target display-manager.service
+Wants=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/aura/bin/aura-perf-detect apply
+ExecStop=/usr/lib/aura/bin/aura-perf-detect restore
+TimeoutStartSec=60
+# Doit survivre à l'entrée en game-mode
+Slice=system.slice
+
+[Install]
+WantedBy=multi-user.target

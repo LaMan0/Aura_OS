@@ -1,0 +1,4 @@
+# Projet ciblant Linux : LF partout (les scripts en CRLF cassent au boot)
+* text=auto eol=lf
+*.png binary
+*.jpg binary

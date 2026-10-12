@@ -1,0 +1,438 @@
+#!/usr/bin/env bash
+# =============================================================================
+# aura-vault — Sauvegardes unifiées cross-launchers (« Aura Vault »)
+# -----------------------------------------------------------------------------
+# Le problème : mes sauvegardes de jeux sont éclatées entre préfixes Proton,
+# jeux natifs Linux et émulateurs. Aura Vault centralise tout :
+#
+#   · REGISTRE    : base jeu → chemins de sauvegardes (Proton, natif, émulateurs)
+#   · TIME-MACHINE: instantanés par jeu — copie complète par défaut (SÛRE même
+#                   si le jeu réécrit ses saves en place), mode --fast en hardlinks
+#                   (`cp -al`, coût ≈ 0 mais inode partagé = caveat in-place)
+#   · SYNCHRO     : envoi de l'historique vers une cible CHOISIE par l'utilisateur
+#                   (dossier local, NAS, chemin rsync distant, remote rclone)
+#   · RESTAURATION: remonter dans le temps par jeu (avec instantané de sécurité)
+#   · JOURNAL     : append-only, 100 % hors-ligne, aucune cloud imposée
+#
+# Commandes :
+#   init [--target CIBLE]        crée la configuration, le registre, la cible
+#   scan                         propose les sauvegardes détectées (Proton/RetroArch/natif)
+#   register <jeu> <chemin...>   enregistre des chemins pour un jeu
+#   list                         liste les jeux, chemins, instantanés, synchro
+#   snapshot [jeu]               crée un instantané (tous les jeux si omis)
+#   sync [jeu]                   synchronise l'historique vers la cible
+#   restore <jeu> <date>         restaure un instantané (ISO : 20261012T120000Z)
+#   log [jeu]                    journal des opérations
+#   prune --keep N               garde les N instantanés les plus récents par jeu
+#   self-test                    test de bout en bout (dossiers temporaires)
+#
+# Codes de sortie : 0 = OK · 10 = rien à faire / partiel · 20 = erreur
+# =============================================================================
+set -euo pipefail
+
+readonly PROG="aura-vault"
+CONF_DIR="" CONF="" VAULT_DIR="" REGISTRY="" SNAP_DIR="" JOURNAL="" PREFIX_ROOT=""
+
+# Résolution des chemins — rejouable : le self-test redéfinit les variables
+# d'environnement puis rappelle set_paths (les chemins ne doivent pas être
+# figés au démarrage, sinon les surcharges internes sont ignorées).
+set_paths() {
+  CONF_DIR="${AURA_CONF_DIR:-/etc/aura}"
+  CONF="${CONF_DIR}/vault.conf"
+  VAULT_DIR="${AURA_VAULT_DIR:-/var/lib/aura/vault}"
+  REGISTRY="${VAULT_DIR}/registry.conf"
+  SNAP_DIR="${VAULT_DIR}/snapshots"
+  JOURNAL="${VAULT_DIR}/journal.log"
+  PREFIX_ROOT="${AURA_PREFIX_ROOT:-/var/lib/aura/prefixes}"
+  return 0
+}
+set_paths
+
+VAULT_TARGET="" VAULT_KEEP=20 SNAP_MODE="copy"
+
+log()  { printf '[%s] %s\n' "${PROG}" "$*" >&2; }
+warn() { printf '[%s] AVERTISSEMENT: %s\n' "${PROG}" "$*" >&2; }
+die()  { printf '[%s] ERREUR: %s\n' "${PROG}" "$*" >&2; exit 20; }
+
+journal() { # journal <action> <détail>
+  printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$1" "$2" >> "${JOURNAL}" 2>/dev/null || true
+  return 0
+}
+
+load_conf() {
+  local cfg_target="" cfg_keep=""
+  if [[ -r "${CONF}" ]]; then
+    cfg_target=$(grep -oP '^VAULT_TARGET=\K.*' "${CONF}" 2>/dev/null | tr -d '"')
+    cfg_keep=$(grep -oP '^VAULT_KEEP=\K.*' "${CONF}" 2>/dev/null | tr -d '"')
+  fi
+  # Une valeur déjà posée (--target, self-test) prime sur le fichier.
+  [[ -n "${VAULT_TARGET}" ]] || VAULT_TARGET="${cfg_target}"
+  [[ -n "${VAULT_KEEP}" ]] || VAULT_KEEP="${cfg_keep:-20}"
+  mkdir -p "${VAULT_DIR}" "${SNAP_DIR}" 2>/dev/null \
+    || die "impossible de créer ${VAULT_DIR}"
+  [[ -e "${REGISTRY}" ]] || : > "${REGISTRY}"
+  return 0
+}
+
+# =============================================================================
+# init
+# =============================================================================
+cmd_init() {
+  load_conf
+  mkdir -p "${CONF_DIR}" || die "impossible de créer ${CONF_DIR}"
+  if [[ -n "${VAULT_TARGET}" ]]; then
+    cat > "${CONF}" <<EOF
+# vault.conf — configuration d'Aura Vault
+# Cible de synchro : dossier local, NAS, chemin rsync (user@host:path), ou rclone:remote:path
+VAULT_TARGET="${VAULT_TARGET}"
+# Nombre d'instantanés conservés par jeu (prune)
+VAULT_KEEP=${VAULT_KEEP}
+EOF
+    case "${VAULT_TARGET}" in
+      rclone:*) log "cible rclone : ${VAULT_TARGET#rclone:}" ;;
+      *)        mkdir -p "${VAULT_TARGET}/history" 2>/dev/null || warn "cible inaccessible : ${VAULT_TARGET}"
+                log "cible locale/rsync : ${VAULT_TARGET}" ;;
+    esac
+    journal "init" "target=${VAULT_TARGET}"
+  else
+    log "aucune cible définie — modifiez ${CONF} (VAULT_TARGET) ou relancez : ${PROG} init --target /chemin"
+  fi
+  log "Vault initialisé : registre ${REGISTRY}, instantanés ${SNAP_DIR}"
+  return 0
+}
+
+# =============================================================================
+# scan : heuristiques de détection des sauvegardes
+# =============================================================================
+cmd_scan() {
+  load_conf
+  echo "=== sauvegardes détectées (propositions — validez via '${PROG} register') ==="
+  local d appid name
+
+  # 1. Préfixes Proton : compatdata/<appid>/pfx/drive_c/users/*/AppData
+  for d in "${PREFIX_ROOT}"/*/compatdata/*/pfx/drive_c/users/*/AppData \
+           "${HOME}"/.steam/steam/steamapps/compatdata/*/pfx/drive_c/users/*/AppData; do
+    [[ -d "${d}" ]] || continue
+    appid=$(grep -oP 'compatdata/\K[0-9]+' <<<"${d}" | head -n1)
+    name="steam-${appid:-inconnu}"
+    printf '  propose : %s|%s\n' "${name}" "${d}"
+  done
+
+  # 2. Émulateurs : sauvegardes RetroArch
+  for d in "${HOME}"/.config/retroarch/saves "${HOME}"/.local/share/retroarch/saves; do
+    [[ -d "${d}" ]] && printf '  propose : retroarch|%s\n' "${d}"
+  done
+
+  # 3. Natif : dossiers <app>/saves sous ~/.local/share
+  for d in "${HOME}"/.local/share/*/saves; do
+    [[ -d "${d}" ]] && printf '  propose : %s|%s\n' "$(basename "$(dirname "${d}")")" "${d}"
+  done
+  echo "=== fin du scan (10 = des propositions sont affichées) ==="
+  return 10
+}
+
+# =============================================================================
+# register
+# =============================================================================
+cmd_register() {
+  load_conf
+  local jeu="${1:-}"; shift || true
+  [[ -n "${jeu}" ]] || die "usage : ${PROG} register <jeu> <chemin...>"
+  (( $# )) || die "aucun chemin fourni"
+  local p
+  for p in "$@"; do
+    [[ -e "${p}" ]] || warn "chemin inexistant (enregistré quand même) : ${p}"
+    # dédoublonnage
+    if grep -qxF "${jeu}|${p}" "${REGISTRY}" 2>/dev/null; then
+      log "déjà enregistré : ${jeu}|${p}"
+    else
+      printf '%s|%s\n' "${jeu}" "${p}" >> "${REGISTRY}"
+      log "enregistré : ${jeu} ← ${p}"
+      journal "register" "${jeu}|${p}"
+    fi
+  done
+  return 0
+}
+
+# =============================================================================
+# list
+# =============================================================================
+cmd_list() {
+  load_conf
+  echo "=== Aura Vault — registre ${REGISTRY} ==="
+  if [[ ! -s "${REGISTRY}" ]]; then
+    echo "  (registre vide — '${PROG} scan' puis '${PROG} register')"
+    return 10
+  fi
+  local jeu path last
+  while IFS='|' read -r jeu path; do
+    [[ -n "${jeu}" ]] || continue
+    last=$(ls -1 "${SNAP_DIR}/${jeu}" 2>/dev/null | tail -n1)
+    printf '  %-18s %-52s snapshots: %s | dernier: %s\n' \
+      "${jeu}" "${path}" "$(ls -1 "${SNAP_DIR}/${jeu}" 2>/dev/null | wc -l)" "${last:-—}"
+  done < "${REGISTRY}"
+  return 0
+}
+
+# =============================================================================
+# snapshot : time-machine par jeu (hardlinks si possible, copie sinon)
+# =============================================================================
+do_snapshot() { # do_snapshot <jeu> <libellé>
+  local jeu="$1" label="${2:-auto}" ts dest rel path count=0
+  ts=$(date -u +%Y%m%dT%H%M%SZ)
+  dest="${SNAP_DIR}/${jeu}/${ts}"
+  mkdir -p "${dest}/files" || die "impossible de créer ${dest}"
+  while IFS='|' read -r g path; do
+    [[ "${g}" == "${jeu}" ]] || continue
+    [[ -e "${path}" ]] || { warn "chemin absent, ignoré : ${path}"; continue; }
+    rel="${path#/}"
+    mkdir -p "${dest}/files/$(dirname "${rel}")"
+    # copie complète par défaut : sûre même quand le jeu réécrit ses saves
+    # en place (les hardlinks partageraient l'inode et casseraient la
+    # time-machine). Mode --fast : hardlinks (un seul inode, coût ≈ 0).
+    if [[ "${SNAP_MODE}" == "hardlink" ]] && cp -al "${path}" "${dest}/files/${rel}" 2>/dev/null; then
+      :
+    else
+      cp -a "${path}" "${dest}/files/${rel}"
+    fi
+    count=$(( count + 1 ))
+  done < "${REGISTRY}"
+  [[ ${count} -gt 0 ]] || { rmdir "${dest}/files" "${dest}" 2>/dev/null || true; warn "aucun chemin sauvegardé pour ${jeu}"; return 10; }
+  printf '%s\n' "${label}" > "${dest}/label"
+  log "instantané ${jeu} @ ${ts} (${count} chemin(s), ${label})"
+  journal "snapshot" "${jeu}@${ts} (${label})"
+  return 0
+}
+
+cmd_snapshot() {
+  load_conf
+  local jeu="" rc=0 a
+  for a in "$@"; do
+    if [[ "${a}" == "--fast" ]]; then SNAP_MODE="hardlink"; else jeu="${a}"; fi
+  done
+  if [[ -n "${jeu}" ]]; then
+    do_snapshot "${jeu}" "manuel" || rc=$?
+  else
+    local g seen=""
+    while IFS='|' read -r g _; do
+      [[ -n "${g}" && " ${seen} " != *" ${g} "* ]] || continue
+      seen="${seen} ${g}"
+      do_snapshot "${g}" "manuel" || rc=10
+    done < "${REGISTRY}"
+    [[ -n "${seen}" ]] || die "registre vide — rien à sauvegarder"
+  fi
+  return "${rc}"
+}
+
+# =============================================================================
+# sync : envoi de l'historique vers la cible choisie
+# =============================================================================
+cmd_sync() {
+  load_conf
+  [[ -n "${VAULT_TARGET}" ]] || die "aucune cible — '${PROG} init --target /chemin' ou éditez ${CONF}"
+  local jeu="${1:-}" g rc=0
+
+  sync_one() {
+    local g="$1" src="${SNAP_DIR}/$1" dst
+    case "${VAULT_TARGET}" in
+      rclone:*)
+        dst="${VAULT_TARGET#rclone:}/history/${g}"
+        command -v rclone >/dev/null 2>&1 || die "rclone introuvable (cible rclone:)"
+        rclone sync "${src}" "${dst}" || return 10 ;;
+      *)
+        dst="${VAULT_TARGET}/history/${g}"
+        mkdir -p "${dst}" || die "cible inaccessible : ${dst}"
+        if command -v rsync >/dev/null 2>&1; then
+          rsync -aH --delete "${src}/" "${dst}/" || return 10   # -H : hardlinks préservés
+        else
+          rm -rf "${dst}.tmp"; cp -a "${src}" "${dst}.tmp" && rm -rf "${dst}" && mv "${dst}.tmp" "${dst}" || return 10
+        fi ;;
+    esac
+    log "synchronisé : ${g} → ${dst}"
+    journal "sync" "${g} → ${dst}"
+    return 0
+  }
+
+  if [[ -n "${jeu}" ]]; then
+    [[ -d "${SNAP_DIR}/${jeu}" ]] || die "aucun instantané pour ${jeu} — lancez '${PROG} snapshot'"
+    sync_one "${jeu}" || rc=$?
+  else
+    local found=0
+    for g in "${SNAP_DIR}"/*; do
+      [[ -d "${g}" ]] || continue
+      found=1
+      sync_one "$(basename "${g}")" || rc=10
+    done
+    (( found )) || die "aucun instantané à synchroniser"
+  fi
+  return "${rc}"
+}
+
+# =============================================================================
+# restore : remonter un instantané (avec instantané de sécurité préalable)
+# =============================================================================
+cmd_restore() {
+  load_conf
+  local jeu="${1:-}" ts="${2:-}"
+  [[ -n "${jeu}" && -n "${ts}" ]] || die "usage : ${PROG} restore <jeu> <date (ex: 20261012T120000Z)>"
+  local snap="${SNAP_DIR}/${jeu}/${ts}"
+  [[ -d "${snap}" ]] || die "instantané introuvable : ${snap}"
+
+  # sécurité : état courant sauvegardé avant écrasement
+  do_snapshot "${jeu}" "pre-restore" || warn "sauvegarde pré-restore incomplète"
+
+  local g path rel src
+  while IFS='|' read -r g path; do
+    [[ "${g}" == "${jeu}" ]] || continue
+    rel="${path#/}"
+    src="${snap}/files/${rel}"
+    [[ -e "${src}" ]] || { warn "absent de l'instantané : ${path}"; continue; }
+    if [[ -d "${src}" ]]; then
+      mkdir -p "${path}"
+      if command -v rsync >/dev/null 2>&1; then
+        rsync -a --delete "${src}/" "${path}/"
+      else
+        rm -rf "${path}"; cp -a "${src}" "${path}"
+      fi
+    else
+      mkdir -p "$(dirname "${path}")"
+      cp -a "${src}" "${path}"
+    fi
+    log "restauré : ${path} ← ${ts}"
+    journal "restore" "${jeu}: ${path} ← ${ts}"
+  done < "${REGISTRY}"
+  echo "=== restauration de « ${jeu} » depuis ${ts} terminée ==="
+  return 0
+}
+
+# =============================================================================
+# log / prune
+# =============================================================================
+cmd_log() {
+  load_conf
+  local jeu="${1:-}"
+  [[ -r "${JOURNAL}" ]] || { echo "(journal vide)"; return 10; }
+  if [[ -n "${jeu}" ]]; then grep -F "${jeu}" "${JOURNAL}" || true; else cat "${JOURNAL}"; fi
+  return 0
+}
+
+cmd_prune() {
+  load_conf
+  local keep="${VAULT_KEEP}"
+  [[ "${1:-}" == "--keep" && -n "${2:-}" ]] && keep="$2"
+  local g n
+  for g in "${SNAP_DIR}"/*; do
+    [[ -d "${g}" ]] || continue
+    n=$(ls -1 "${g}" | wc -l)
+    if (( n > keep )); then
+      ls -1 "${g}" | head -n $(( n - keep )) | while read -r old; do
+        rm -rf "${g:?}/${old}"
+        log "purge : ${g##*/}@${old}"
+        journal "prune" "${g##*/}@${old}"
+      done
+    fi
+  done
+  return 0
+}
+
+# =============================================================================
+# self-test : bout en bout dans des dossiers temporaires
+# =============================================================================
+cmd_self_test() {
+  local tmp fail=0
+  tmp=$(mktemp -d)
+  export AURA_VAULT_DIR="${tmp}/vault" AURA_CONF_DIR="${tmp}/etc" AURA_PREFIX_ROOT="${tmp}/prefixes"
+  set_paths
+  VAULT_TARGET="${tmp}/target"
+
+  echo "=== self-test Aura Vault (${tmp}) ==="
+  cmd_init >/dev/null 2>&1 || fail=1
+
+  # jeu factice avec 2 fichiers de sauvegarde
+  mkdir -p "${tmp}/saves/mon-jeu"
+  printf 'etape-1\n' > "${tmp}/saves/mon-jeu/progression.dat"
+  printf 'config-v1\n' > "${tmp}/saves/mon-jeu/options.ini"
+
+  cmd_register "mon-jeu" "${tmp}/saves/mon-jeu" >/dev/null 2>&1 || fail=1
+  do_snapshot "mon-jeu" "t1" >/dev/null 2>&1 || fail=1
+
+  sleep 1   # horodatage distinct
+  printf 'etape-2\n' > "${tmp}/saves/mon-jeu/progression.dat"
+  do_snapshot "mon-jeu" "t2" >/dev/null 2>&1 || fail=1
+
+  local nsnaps
+  nsnaps=$(ls -1 "${AURA_VAULT_DIR}/snapshots/mon-jeu" | wc -l)
+  if [[ "${nsnaps}" -eq 2 ]]; then echo "  OK    2 instantanés créés"; else echo "  ECHEC instantanés=${nsnaps} (attendu 2)"; fail=1; fi
+
+  # restauration du 1er instantané
+  local first
+  first=$(ls -1 "${AURA_VAULT_DIR}/snapshots/mon-jeu" | head -n1)
+  cmd_restore "mon-jeu" "${first}" >/dev/null 2>&1 || fail=1
+  if grep -q 'etape-1' "${tmp}/saves/mon-jeu/progression.dat"; then
+    echo "  OK    restauration time-machine (etape-1 retrouvée)"
+  else
+    echo "  ECHEC restauration : contenu inattendu"; fail=1
+  fi
+
+  # synchro vers la cible
+  cmd_sync "mon-jeu" >/dev/null 2>&1 || fail=1
+  if [[ -d "${VAULT_TARGET}/history/mon-jeu" ]]; then
+    echo "  OK    synchro cible (${VAULT_TARGET}/history/mon-jeu)"
+  else
+    echo "  ECHEC synchro cible"; fail=1
+  fi
+
+  # journal
+  if grep -q 'snapshot' "${AURA_VAULT_DIR}/journal.log" 2>/dev/null; then
+    echo "  OK    journal opérationnel"
+  else
+    echo "  ECHEC journal"; fail=1
+  fi
+
+  rm -rf "${tmp}"
+  if (( fail )); then die "self-test ÉCHOUÉ"; fi
+  echo "=== SELF-TEST OK — Aura Vault conforme ==="
+  return 0
+}
+
+# =============================================================================
+usage() {
+  cat <<EOF
+usage : ${PROG} <commande> [options]
+
+  init [--target CIBLE]      initialise le Vault (cible : dossier, NAS, user@host:path, rclone:remote:path)
+  scan                       détecte les sauvegardes (Proton, RetroArch, natif)
+  register <jeu> <chemin...> enregistre des chemins de sauvegarde
+  list                       liste les jeux et leur état
+  snapshot [--fast] [jeu]     crée un instantané (time-machine ; --fast = hardlinks)
+  sync [jeu]                 synchronise l'historique vers la cible
+  restore <jeu> <date>       restaure un instantané (ex: 20261012T120000Z)
+  log [jeu]                  journal des opérations
+  prune --keep N             garde les N instantanés les plus récents
+  self-test                  test de bout en bout
+
+exit : 0 = OK · 10 = rien à faire / propositions affichées · 20 = erreur
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "${cmd}" in
+    init)
+      [[ "${1:-}" == "--target" ]] && { VAULT_TARGET="${2:-}"; shift; } || true
+      cmd_init "$@" ;;
+    scan)     cmd_scan "$@" ;;
+    register) cmd_register "$@" ;;
+    list)     cmd_list "$@" ;;
+    snapshot) cmd_snapshot "$@" ;;
+    sync)     cmd_sync "$@" ;;
+    restore)  cmd_restore "$@" ;;
+    log)      cmd_log "$@" ;;
+    prune)    cmd_prune "$@" ;;
+    self-test|selftest) cmd_self_test "$@" ;;
+    -h|--help|help) usage ;;
+    *) usage; die "commande inconnue : ${cmd}" ;;
+  esac
+}
+
+main "$@"

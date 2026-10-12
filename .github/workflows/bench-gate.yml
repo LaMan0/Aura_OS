@@ -1,0 +1,112 @@
+name: bench-gate
+
+# =============================================================================
+# Porte de performance AuraOS : bloque toute release si le plancher 30 FPS
+# (mesuré en 1% low par bench-fps.sh) est cassé sur un jeu de référence.
+#
+#   selftest  → syntaxe Bash + self-tests (moteur statistique, Aura Vault)
+#   bench     → analyse chaque trace de référence de bench/traces/*.csv
+#               (1% low ≥ 30 FPS obligatoire) — un échec sort en code 10,
+#               ce qui fait échouer le job et bloque la release
+#   release   → ne s'exécute QUE si les deux jobs précédents sont verts
+#
+# Pour ajouter un jeu de référence : déposer sa trace MangoHud dans
+# bench/traces/<nom-du-jeu>.csv (voir bench/traces/README.md).
+# =============================================================================
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  selftest:
+    name: Self-tests (syntaxe, moteur stats, Vault)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntaxe Bash (tous les scripts)
+        run: |
+          set -euo pipefail
+          for f in scripts/*; do
+            case "$f" in
+              *.md) continue ;;
+            esac
+            bash -n "$f"
+            echo "OK $f"
+          done
+
+      - name: Self-test du moteur statistique (bench-fps.sh)
+        run: scripts/bench-fps.sh self-test
+
+      - name: Self-test Aura Vault (time-machine + synchro)
+        run: scripts/aura-vault self-test
+
+  bench:
+    name: Bench des jeux de référence (plancher 30 FPS)
+    needs: selftest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validation du plancher 30 FPS (1% low) sur chaque trace
+        run: |
+          set -euo pipefail
+          fail=0
+          shopt -s nullglob
+          for t in bench/traces/*.csv; do
+            game=$(basename "$t" .csv)
+            echo "::group::${game}"
+            # bench-fps.sh : 0 = plancher tenu, 10 = plancher NON tenu (gate), 20 = erreur
+            set +e
+            scripts/bench-fps.sh analyse \
+              --input "$t" \
+              --game "$game" \
+              --floor 30 \
+              --mark-verified \
+              --output "bench-${game}.json"
+            rc=$?
+            set -e
+            echo "::endgroup::"
+            if [ "$rc" -eq 10 ]; then
+              echo "::error::PLANCHER 30 FPS CASSÉ pour ${game} (1% low < 30) — release bloquée"
+              fail=1
+            elif [ "$rc" -ne 0 ]; then
+              echo "::error::bench-fps.sh en erreur (rc=${rc}) pour ${game}"
+              fail=1
+            fi
+          done
+          exit "$fail"
+
+      - name: Publication des rapports JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: bench-*.json
+          if-no-files-found: ignore
+
+  release:
+    name: Release (bloquée si plancher cassé)
+    needs: [ selftest, bench ]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Création de la release GitHub
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "AuraOS ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag \
+            || echo "release déjà existante : ${GITHUB_REF_NAME}"
