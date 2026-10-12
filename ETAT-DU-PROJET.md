@@ -116,7 +116,7 @@ python -m http.server 8231 --bind 127.0.0.1 --directory ~/Documents/nomos_OS/pre
 
 ## 4. RÉSUMÉ COMPLET DES FICHIERS PRÉSENTS
 
-**26 fichiers · 215 Ko** · racine : `C:\Users\maeno\Documents\nomos_OS\`
+**28 fichiers · 220 Ko** · racine : `C:\Users\maeno\Documents\nomos_OS\`
 
 | Fichier | Taille | Rôle |
 |---|---|---|
@@ -133,6 +133,7 @@ python -m http.server 8231 --bind 127.0.0.1 --directory ~/Documents/nomos_OS/pre
 | `scripts/aura-run` | 8 Ko | Lanceur universel de jeux (routing Proton/natif/émulateur/sandbox) |
 | `scripts/build-iso.sh` | 7 Ko | Build d'ISO hybride + signature + publication Release GitHub |
 | `scripts/bench-fps.sh` | 11 Ko | Benchmarks : 1% low FPS, validation plancher 30 FPS, badges « Verified 30 FPS » |
+| `scripts/aura-vault` | 13 Ko | Aura Vault : saves cross-launchers, time-machine, synchro, restauration |
 | `systemd/aura-perf-detect.service` | < 1 Ko | Application du profil perf au boot (oneshot) |
 | `systemd/aura-update.service` | < 1 Ko | Vérification MAJ (oneshot, exit 10 = MAJ disponible) |
 | `systemd/aura-update.timer` | < 1 Ko | Vérification périodique (6 h, jitter 30 min) |
@@ -145,6 +146,8 @@ python -m http.server 8231 --bind 127.0.0.1 --directory ~/Documents/nomos_OS/pre
 | `bench/traces/README.md` | 1 Ko | Traces de référence : format, enregistrement MangoHud, test du gate |
 | `bench/traces/reference-merguez-30fps.csv` | 12 Ko | Trace de référence (gate) : 1% low = 32.06 FPS ✅ |
 | `bench/traces/examples/example-stutter-fail.csv` | 12 Ko | Exemple volontairement raté (hors gate) : 1% low = 12.50 ❌ |
+| `.gitignore` | < 1 Ko | Exclusions git (build/, ISO, logs) |
+| `.gitattributes` | < 1 Ko | Normalisation LF (les scripts CRLF cassent sous Linux) |
 
 ### Comment naviguer dans le projet
 1. **Comprendre le projet** : `README.md` → `docs/00` (exigences) → `docs/01` (architecture).
