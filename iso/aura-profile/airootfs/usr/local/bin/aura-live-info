@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cat <<'EOF'
+AuraOS Live — prototype 0.1
+Base : Arch Linux Live + XFCE
+État : démonstration uniquement, sans installateur ni mode Gaming intégré.
+Pour quitter : déconnectez-vous ou éteignez la machine virtuelle.
+EOF

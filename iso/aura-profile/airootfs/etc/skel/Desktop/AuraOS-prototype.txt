@@ -1,0 +1,5 @@
+AuraOS Live — prototype 0.1
+
+Ceci est une préversion de démonstration basée sur Arch Linux et XFCE.
+L'interface Gaming AuraOS, l'installation sur disque et le dual-boot ne sont pas inclus.
+Ne lancez pas d'installation ni de partitionnement depuis cette image.

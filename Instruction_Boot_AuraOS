@@ -1,0 +1,72 @@
+# Instruction_Boot_AuraOS — construire et tester dans VirtualBox
+
+## Ce que nous construisons
+
+Une **ISO prototype Live Arch Linux + XFCE** avec quelques éléments AuraOS, destinée à un premier test dans VirtualBox. Ce n'est pas encore la distribution gaming complète : pas d'Aura Shell, pas d'installeur ni de dual-boot. N'essayez pas de l'installer sur un disque. Le build et le démarrage ne sont pas encore vérifiés à ce stade.
+
+## Parcours conseillé sous Windows 11
+
+Il faut deux machines virtuelles VirtualBox séparées :
+
+1. une VM Linux Arch pour construire l'ISO ;
+2. une VM de test pour démarrer AuraOS depuis l'ISO.
+
+La VM de test ne requiert pas de virtualisation imbriquée. Évitez WSL comme méthode de premier build : Archiso et ses privilèges sont plus simples à tester dans une VM Linux dédiée.
+
+## A. Créer la VM de construction Linux
+
+1. Installez VirtualBox depuis le site officiel et téléchargez l'ISO officielle d'Arch Linux.
+2. Créez une VM Linux 64 bits. À titre de départ : 4 vCPU (si disponibles), 6–8 Go RAM et un disque virtuel dynamique de 50 Go ou plus. Ne donnez pas toutes les ressources de l'hôte à la VM.
+3. Installez Arch Linux dans cette VM selon le guide officiel. Cette étape installe Linux **dans le disque virtuel de la VM de build**, pas sur le PC hôte.
+4. Dans Arch, installez les outils de base :
+
+```bash
+sudo pacman -Syu --needed archiso git
+```
+
+5. Obtenez le dépôt AuraOS dans la VM. Option simple : installer les Additions invité VirtualBox et utiliser un dossier partagé avec le dépôt Windows. Autre option : cloner votre dépôt distant. Si le dossier partagé a des problèmes de permissions, copiez le dépôt dans le système de fichiers Linux de la VM.
+
+## B. Construire l'ISO AuraOS
+
+Depuis un terminal Arch Linux, à la racine du dépôt :
+
+```bash
+bash -n scripts/build-iso.sh
+bash scripts/build-iso.sh --dry-run
+sudo bash scripts/build-iso.sh --version 0.1.0
+```
+
+Le build prend du temps et télécharge des paquets. Il écrit dans `build/out/` et n'est pas censé modifier le profil source. Vérifiez les fichiers :
+
+```bash
+ls -lh build/out/
+cd build/out
+sha256sum -c auraos-0.1.0-x86_64.iso.sha256
+```
+
+Il faut voir `OK`. **Une compilation réussie ne garantit pas encore que l'ISO démarre** : le test suivant est obligatoire. En cas d'erreur, copiez ici le message complet avant de relancer.
+
+## C. Tester l'ISO dans une VM VirtualBox séparée
+
+1. Créez une deuxième VM : type Linux, version Arch Linux (64-bit), 2–4 vCPU et 4–8 Go de RAM selon la mémoire disponible. Créez un disque virtuel VDI dynamique (par exemple 25 Go) pour garder la VM isolée ; le démarrage Live ne devrait pas l'utiliser.
+2. Dans **Configuration → Système → Carte mère**, activez **Activer EFI** pour tester le démarrage UEFI.
+3. Dans **Configuration → Stockage**, attachez `auraos-0.1.0-x86_64.iso` au lecteur optique.
+4. Dans **Affichage**, commencez avec le contrôleur par défaut et désactivez l'accélération 3D si l'affichage est instable.
+5. Démarrez la VM. Choisissez l'entrée Live par défaut, sans installation. Ne connectez jamais un disque physique à cette VM.
+6. Vérifiez si XFCE s'ouvre et testez dans un terminal :
+
+```bash
+aura-live-info
+systemctl is-active NetworkManager
+```
+
+7. Éteignez la VM depuis le menu du bureau. Notez si le boot réussit, le temps approximatif, les erreurs, la version de VirtualBox et la configuration VM.
+
+Un test BIOS Legacy est facultatif et doit être fait séparément en désactivant EFI. Ne revendiquez que les modes qui démarrent réellement. Le Secure Boot et l'installation ne sont pas couverts.
+
+## Sécurité
+
+- N'utilisez pas d'option « Installer » : le prototype n'en fournit pas.
+- Ne faites pas de partitionnement et ne branchez pas de disque physique à la VM.
+- Ne flashez pas l'ISO sur une clé USB avant son démarrage réussi en VM et une sauvegarde des données de la clé.
+- N'activez pas `--publish` pour ce prototype.

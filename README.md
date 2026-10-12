@@ -3,11 +3,9 @@
 **Version du cahier des charges :** 1.0 — projet `nomos_OS`
 **Rôle :** conception technique complète (architecture, UI, mise à jour, performances) + scripts de déploiement.
 
-AuraOS est une distribution Linux hybride modulaire optimisée pour le jeu vidéo :
-un mode Gaming « chic & épure » au boot, un mode Bureau XFCE d'un raccourci,
-une couche de compatibilité universelle (Steam/Proton, Epic, GOG, `.exe` isolés, émulateurs),
-une mise à jour 1-clic depuis GitHub Releases, et un profiler matériel garantissant
-**30 FPS minimum sur machine modeste ("merguez")** et **144+ FPS sans bridage sur high-end**.
+AuraOS est un projet de distribution Linux optimisée pour le jeu vidéo, actuellement au stade conception/prototype. Les fonctions gaming, compatibilité universelle, mises à jour A/B et promesses de performance décrites ci-dessous sont des objectifs, pas encore un système livré.
+
+Le premier profil ISO (`iso/aura-profile/`) vise un prototype Live Arch Linux + XFCE pour test en VM. Il n'inclut pas Aura Shell, un installeur ni la pile gaming complète. Le build et le démarrage de l'ISO restent à vérifier sur Linux/VirtualBox ; voir `Instruction_Boot_AuraOS` et `Rapport_fonctionnement_AuraOS`.
 
 ---
 
@@ -38,7 +36,8 @@ nomos_OS/
 │   ├── aura.conf                    ← configuration système de référence
 │   └── update.conf                  ← dépôt GitHub, clés de signature, canal (stable/beta)
 ├── iso/
-│   └── README-iso.md                ← profil archiso / paramètres de l'image Live & Play
+│   ├── README-iso.md                ← périmètre prototype et procédure de build/test
+│   └── aura-profile/                ← profil Archiso Live + XFCE (prototype non validé)
 ├── bench/traces/                    ← traces de référence du gate 30 FPS (CI)
 └── .github/workflows/bench-gate.yml ← CI : self-tests + gate 30 FPS, bloque la release
 ```
@@ -63,8 +62,9 @@ sudo scripts/aura-update apply --reboot
 # 5. Lancer un jeu via la couche de compatibilité
 scripts/aura-run --profile default ~/Games/mon_jeu.exe
 
-# 6. Construire l'ISO hybride (nécessite archiso)
-sudo scripts/build-iso.sh --version 1.0.0
+# 6. Construire l'ISO prototype Live (Arch Linux + XFCE ; test requis)
+bash scripts/build-iso.sh --dry-run
+sudo bash scripts/build-iso.sh --version 0.1.0
 
 # 7. Benchmarks : valider le plancher 30 FPS (1% low) par jeu
 scripts/bench-fps.sh self-test                    # vérifie le moteur statistique

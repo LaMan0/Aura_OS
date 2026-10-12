@@ -1,29 +1,15 @@
 #!/usr/bin/env bash
-# =============================================================================
-# build-iso.sh — Construction de l'ISO hybride « Live & Play » d'AuraOS
-# -----------------------------------------------------------------------------
-# Produit une image ISO bootable UEFI + BIOS Legacy à partir du profil archiso,
-# puis (optionnellement) signe et publie la release sur GitHub.
-#
-# Usage :
-#   sudo ./build-iso.sh --version 1.0.0 [--channel stable] [--dry-run] [--publish]
-#
-# Sorties (dossier ./out) :
-#   AuraOS-<version>-x86_64.iso          image hybride Live + installeur
-#   AuraOS-<version>-x86_64.iso.sha256   empreinte SHA-256
-#   AuraOS-<version>-x86_64.iso.zsync    delta pour les mises à jour
-#   SHA256SUMS(.minisig)                  manifeste signé (minisign)
-# =============================================================================
+# Build the AuraOS Live prototype from the Archiso profile.
 set -euo pipefail
 
 readonly PROG="build-iso.sh"
-readonly HERE="$(cd "$(dirname "$0")" && pwd)"
-readonly PROFILE_SRC="${HERE}/../iso/aura-profile"
-readonly WORK_DIR="${HERE}/../build/work"
-readonly OUT_DIR="${HERE}/../build/out"
+readonly REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+readonly PROFILE_SRC="${REPO_ROOT}/iso/aura-profile"
+readonly BUILD_ROOT="${REPO_ROOT}/build"
+readonly WORK_DIR="${BUILD_ROOT}/work"
+readonly OUT_DIR="${BUILD_ROOT}/out"
 
-VERSION="1.0.0"
-CHANNEL="stable"
+VERSION="0.1.0"
 DRY_RUN=0
 PUBLISH=0
 
@@ -32,22 +18,21 @@ die() { printf '[%s] ERREUR: %s\n' "${PROG}" "$*" >&2; exit 20; }
 
 usage() {
   cat <<EOF
-usage : sudo ${PROG} --version X.Y.Z [options]
+usage : sudo bash scripts/${PROG} [options]
 
-  --version X.Y.Z   version de la release (défaut : ${VERSION})
-  --channel C       stable | beta (défaut : ${CHANNEL})
-  --dry-run         affiche le plan de build sans rien construire
-  --publish         publie la release sur GitHub (nécessite gh authentifié)
+  --version X.Y.Z   version du prototype (défaut : ${VERSION})
+  --dry-run         affiche le plan sans modifier de fichiers
+  --publish         publication désactivée pour cette image prototype
   -h, --help        cette aide
 EOF
 }
 
 while (( $# )); do
   case "$1" in
-    --version) VERSION="$2"; shift ;;
+    --version)
+      (( $# >= 2 )) || die "--version attend une valeur"
+      VERSION="$2"; shift ;;
     --version=*) VERSION="${1#*=}" ;;
-    --channel) CHANNEL="$2"; shift ;;
-    --channel=*) CHANNEL="${1#*=}" ;;
     --dry-run) DRY_RUN=1 ;;
     --publish) PUBLISH=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -57,103 +42,54 @@ while (( $# )); do
 done
 
 [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?$ ]] || die "version invalide : ${VERSION}"
-[[ "${CHANNEL}" =~ ^(stable|beta)$ ]] || die "canal invalide : ${CHANNEL}"
+(( PUBLISH == 0 )) || die "la publication est désactivée pour cette image prototype"
 
-ISO_NAME="AuraOS-${VERSION}-x86_64.iso"
+readonly ISO_NAME="auraos-${VERSION}-x86_64.iso"
+readonly STAGE_DIR="${BUILD_ROOT}/profile-${VERSION}"
 
-log "════════════════════════════════════════════════════════"
-log "  Build AuraOS ${VERSION} (canal ${CHANNEL})"
-log "════════════════════════════════════════════════════════"
-
-# --- Étape 0 : plan de build (toujours affiché) ----------------------------
 plan() {
   cat >&2 <<EOF
-PLAN DE BUILD
-  1. Vérification de l'outillage   : archiso, mksquashfs, xorriso, minisign, zsyncmake
-  2. Profil ISO                    : ${PROFILE_SRC}
-  3. Nettoyage                     : ${WORK_DIR}
-  4. mkarchiso                     : image hybride UEFI (systemd-boot/shim) + BIOS (isolinux)
-  5. Intégration                   : aura-perf-detect · aura-update · aura-run · unités systemd
-                                     Aura Shell · XFCE · Proton-GE · Calamares (installeur 3 étapes)
-  6. Sortie                        : ${OUT_DIR}/${ISO_NAME}
-  7. Signature                     : SHA256SUMS + minisign (clé : /etc/aura/update.pub)
-  8. Delta                         : zsyncmake → ${ISO_NAME}.zsync
-  9. Publication GitHub (si --publish) : release v${VERSION} + assets
+BUILD DU PROTOTYPE LIVE AURAOS
+  Profil : ${PROFILE_SRC}
+  Staging isolé : ${STAGE_DIR}
+  Sortie : ${OUT_DIR}/${ISO_NAME}
+  Mode : Live XFCE basé sur Archiso ; aucun installateur ni mode gaming intégré
+  Publication et signature : non configurées pour le prototype
 EOF
 }
 plan
 
-(( DRY_RUN )) && { log "dry-run : arrêt avant toute modification"; exit 0; }
-[[ ${EUID} -eq 0 ]] || die "droits root requis (mkarchiso)"
+(( DRY_RUN )) && { log "dry-run : aucune modification effectuée"; exit 0; }
+[[ ${EUID} -eq 0 ]] || die "droits root requis par mkarchiso"
+[[ -d "${PROFILE_SRC}" ]] || die "profil Archiso introuvable : ${PROFILE_SRC}"
+[[ -f "${PROFILE_SRC}/profiledef.sh" && -f "${PROFILE_SRC}/packages.x86_64" && -f "${PROFILE_SRC}/pacman.conf" ]] || die "profil incomplet"
+command -v mkarchiso >/dev/null 2>&1 || die "outil manquant : mkarchiso (paquet Arch : archiso)"
 
-# --- Étape 1 : outillage ----------------------------------------------------
-for tool in mkarchiso mksquashfs xorriso zsyncmake; do
-  command -v "${tool}" >/dev/null 2>&1 || die "outil manquant : ${tool} (paquet : archiso / squashfs-tools / zsync)"
-done
-log "outillage vérifié"
+# Ensure destructive cleanup remains confined to the repository build directory.
+[[ "${BUILD_ROOT}" == "${REPO_ROOT}/build" && "${BUILD_ROOT}" != "/" ]] || die "chemin de build inattendu"
+mkdir -p "${BUILD_ROOT}" "${OUT_DIR}"
+rm -rf -- "${STAGE_DIR}" "${WORK_DIR}"
+mkdir -p "${STAGE_DIR}" "${WORK_DIR}"
+cp -a "${PROFILE_SRC}/." "${STAGE_DIR}/"
 
-# --- Étape 2 : préparation du profil archiso --------------------------------
-[[ -d "${PROFILE_SRC}" ]] || die "profil archiso introuvable : ${PROFILE_SRC}"
-log "profil archiso : ${PROFILE_SRC}"
+# Copy runtime utilities only into the disposable staging profile.
+install -d "${STAGE_DIR}/airootfs/usr/lib/aura/bin" "${STAGE_DIR}/airootfs/etc/aura"
+install -m 0755 "${REPO_ROOT}/scripts/aura-perf-detect" "${STAGE_DIR}/airootfs/usr/lib/aura/bin/"
+install -m 0755 "${REPO_ROOT}/scripts/aura-update" "${STAGE_DIR}/airootfs/usr/lib/aura/bin/"
+install -m 0755 "${REPO_ROOT}/scripts/aura-run" "${STAGE_DIR}/airootfs/usr/lib/aura/bin/"
+install -m 0644 "${REPO_ROOT}/etc/aura/aura.conf" "${REPO_ROOT}/etc/aura/update.conf" "${STAGE_DIR}/airootfs/etc/aura/"
+install -d "${STAGE_DIR}/airootfs/usr/local/bin"
+install -m 0755 "${PROFILE_SRC}/airootfs/usr/local/bin/aura-live-info" \
+  "${STAGE_DIR}/airootfs/usr/local/bin/aura-live-info"
 
-# Injection des scripts du dépôt dans l'arbre de l'image
-mkdir -p "${PROFILE_SRC}/airootfs/usr/lib/aura/bin"
-cp -f "${HERE}/aura-perf-detect" "${PROFILE_SRC}/airootfs/usr/lib/aura/bin/"
-cp -f "${HERE}/aura-update"      "${PROFILE_SRC}/airootfs/usr/lib/aura/bin/"
-cp -f "${HERE}/aura-run"         "${PROFILE_SRC}/airootfs/usr/lib/aura/bin/"
-chmod 755 "${PROFILE_SRC}/airootfs/usr/lib/aura/bin/"*
+log "construction mkarchiso (cela peut prendre plusieurs minutes)"
+mkarchiso -v -w "${WORK_DIR}" -o "${OUT_DIR}" "${STAGE_DIR}"
 
-mkdir -p "${PROFILE_SRC}/airootfs/etc/systemd/system"
-cp -f "${HERE}/../systemd/"*.service "${HERE}/../systemd/"*.timer \
-      "${PROFILE_SRC}/airootfs/etc/systemd/system/" 2>/dev/null || true
-
-mkdir -p "${PROFILE_SRC}/airootfs/etc/aura"
-cp -f "${HERE}/../etc/aura/"*.conf "${PROFILE_SRC}/airootfs/etc/aura/"
-log "scripts et unités injectés dans l'image"
-
-# --- Étape 3 : nettoyage puis build ----------------------------------------
-log "nettoyage de ${WORK_DIR}…"
-rm -rf "${WORK_DIR}"
-mkdir -p "${WORK_DIR}" "${OUT_DIR}"
-
-log "mkarchiso en cours (plusieurs minutes)…"
-mkarchiso -v -w "${WORK_DIR}" -o "${OUT_DIR}" "${PROFILE_SRC}"
-[[ -s "${OUT_DIR}/${ISO_NAME}" ]] || die "ISO non produite"
-log "ISO produite : ${OUT_DIR}/${ISO_NAME}"
-
-# --- Étape 4 : empreintes & signature --------------------------------------
-(
-  cd "${OUT_DIR}"
-  sha256sum "${ISO_NAME}" > "${ISO_NAME}.sha256"
-  sha256sum "${ISO_NAME}" > SHA256SUMS
-  if command -v minisign >/dev/null 2>&1 && [[ -r /etc/aura/update.key ]]; then
-    minisign -Sm SHA256SUMS -s /etc/aura/update.key
-    log "SHA256SUMS signé (minisign)"
-  else
-    log "AVERTISSEMENT : minisign ou clé absente — release NON signée"
-  fi
-  zsyncmake -u "https://github.com/AuraOS-Project/auraos/releases/download/v${VERSION}/${ISO_NAME}" "${ISO_NAME}"
-  log "delta zsync produit"
-)
-
-# --- Étape 5 : publication GitHub (optionnel) ------------------------------
-if (( PUBLISH )); then
-  command -v gh >/dev/null 2>&1 || die "CLI gh requise pour --publish"
-  log "publication de la release v${VERSION}…"
-  gh release create "v${VERSION}" \
-      --repo AuraOS-Project/auraos \
-      --title "AuraOS v${VERSION}" \
-      --notes "Release ${CHANNEL} d'AuraOS ${VERSION}" \
-      $([[ "${CHANNEL}" == "beta" ]] && echo "--prerelease") \
-      "${OUT_DIR}/${ISO_NAME}" \
-      "${OUT_DIR}/${ISO_NAME}.sha256" \
-      "${OUT_DIR}/${ISO_NAME}.zsync" \
-      "${OUT_DIR}/SHA256SUMS" \
-      $([[ -f "${OUT_DIR}/SHA256SUMS.minisig" ]] && echo "${OUT_DIR}/SHA256SUMS.minisig")
-  log "release publiée"
+BUILT_ISO="$(printf '%s\n' "${OUT_DIR}"/*.iso | sort | tail -n 1)"
+[[ -s "${BUILT_ISO}" ]] || die "aucune ISO produite dans ${OUT_DIR}"
+if [[ "${BUILT_ISO}" != "${OUT_DIR}/${ISO_NAME}" ]]; then
+  mv -- "${BUILT_ISO}" "${OUT_DIR}/${ISO_NAME}"
 fi
-
-log "════════════════════════════════════════════════════════"
-log "  BUILD TERMINÉ : ${OUT_DIR}/${ISO_NAME}"
-log "  Flash : sudo dd if=${OUT_DIR}/${ISO_NAME} of=/dev/sdX bs=4M status=progress conv=fsync"
-log "════════════════════════════════════════════════════════"
+sha256sum "${OUT_DIR}/${ISO_NAME}" > "${OUT_DIR}/${ISO_NAME}.sha256"
+log "ISO produite (boot non encore validé) : ${OUT_DIR}/${ISO_NAME}"
+log "Empreinte : ${OUT_DIR}/${ISO_NAME}.sha256"

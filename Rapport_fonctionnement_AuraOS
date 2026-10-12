@@ -1,0 +1,28 @@
+# Rapport_fonctionnement_AuraOS
+
+**Mise à jour : 12 octobre 2026**
+
+## État
+
+Le dépôt dispose maintenant d'un **profil Archiso de prototype** pour tenter de produire une ISO Live Arch Linux + XFCE. Il ne s'agit pas de l'OS gaming complet. Aucun build réel ni démarrage QEMU/VirtualBox n'a encore été exécuté ou confirmé dans cet environnement Windows.
+
+## Ajouts effectués
+
+- `iso/aura-profile/` : profil Archiso, liste de paquets ajoutés, configuration réseau/LightDM, ouverture automatique d'une session `aura`, message de préversion.
+- `scripts/build-iso.sh` : staging séparé du profil source, nettoyage limité à `build/`, publication désactivée et production d'un hash SHA-256 après le build.
+- `iso/README-iso.md` : périmètre réel et étapes de test.
+- `Instruction_Boot_AuraOS` : parcours proposé avec VM de build Linux et VM VirtualBox de test séparée.
+
+## Limites et risques restants
+
+1. **Non construit / non démarré** : le profil et les configurations doivent être vérifiés avec la version actuelle d'Archiso. La réussite du build et le boot UEFI/BIOS restent à démontrer sur une VM Linux.
+2. **XFCE/LightDM à valider** : l'autologin, le nom de session XFCE et les greeters dépendent des paquets/configurations Arch actuels. Vérifier en VM et corriger les messages d'erreur.
+3. **Boot UEFI/BIOS à valider** : les modes sont déclarés dans `profiledef.sh`, mais seul un test effectif peut confirmer l'amorçage avec la version utilisée d'Archiso.
+4. **Build à vérifier** : le script utilise la première ISO trouvée dans `build/out/` et la renomme selon la version. Tester le cas où le dossier contient plusieurs ISO avant de bâtir plusieurs versions. Le build exige une VM Arch Linux avec privilèges root et accès aux dépôts.
+5. **Support VirtIO/VirtualBox** : les utilitaires invités sont référencés, mais leur compatibilité/démarrage avec le noyau et les modules disponibles est à vérifier.
+6. **Sécurité de la session Live** : le compte `aura` est automatiquement connecté et sans mot de passe verrouillé ; ceci est acceptable uniquement pour une VM de test isolée, pas pour une machine exposée ni une release publique.
+7. **Fonctions produit absentes** : Aura Shell Qt/QML, jeux/Proton/Heroic, installeur Calamares validé, persistance, A/B et Secure Boot ne sont pas inclus/garantis.
+
+## Conclusion
+
+Le prochain jalon est de construire sur une VM Arch Linux, puis de tester l'ISO dans une VM VirtualBox séparée **en Live seulement**. Tant que ces deux étapes ne sont pas documentées avec succès, l'ISO doit être considérée comme expérimentale et non confirmée bootable. Ne pas l'installer sur disque ni la flasher sur une clé de production.

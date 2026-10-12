@@ -1,0 +1,8 @@
+# Paquets additionnels au profil officiel Archiso releng.
+# Image prototype Live : bureau de test, pas de pile gaming complète.
+xfce4
+lightdm
+lightdm-gtk-greeter
+networkmanager
+xorg-server
+virtualbox-guest-utils
