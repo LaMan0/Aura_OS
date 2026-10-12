@@ -41,10 +41,10 @@ jobs:
           done
 
       - name: Self-test du moteur statistique (bench-fps.sh)
-        run: scripts/bench-fps.sh self-test
+        run: bash scripts/bench-fps.sh self-test
 
       - name: Self-test Aura Vault (time-machine + synchro)
-        run: scripts/aura-vault self-test
+        run: bash scripts/aura-vault self-test
 
   bench:
     name: Bench des jeux de référence (plancher 30 FPS)
@@ -63,7 +63,7 @@ jobs:
             echo "::group::${game}"
             # bench-fps.sh : 0 = plancher tenu, 10 = plancher NON tenu (gate), 20 = erreur
             set +e
-            scripts/bench-fps.sh analyse \
+            bash scripts/bench-fps.sh analyse \
               --input "$t" \
               --game "$game" \
               --floor 30 \
