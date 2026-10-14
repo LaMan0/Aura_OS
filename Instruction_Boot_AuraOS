@@ -36,7 +36,16 @@ bash scripts/build-iso.sh --dry-run
 sudo bash scripts/build-iso.sh --version 0.1.0
 ```
 
-Le build prend du temps et télécharge des paquets. Il écrit dans `build/out/` et n'est pas censé modifier le profil source. Vérifiez les fichiers :
+Le script de build **complète automatiquement le profil** à partir du profil de
+référence installé par le paquet `archiso` (`/usr/share/archiso/configs/releng`) :
+
+- il copie les configurations de démarrage `syslinux/` (BIOS) et `efiboot/` (UEFI
+  systemd-boot) — sans elles, `mkarchiso` refuse de démarrer ;
+- il fusionne la liste des paquets de base (noyau `linux`, `mkinitcpio-archiso`,
+  `base`…) avec les ajouts AuraOS (XFCE, LightDM, NetworkManager…).
+
+Le build prend 10 à 20 minutes et télécharge des paquets. Il écrit dans
+`build/out/` et ne modifie pas le profil source. Vérifiez les fichiers :
 
 ```bash
 ls -lh build/out/
@@ -44,7 +53,16 @@ cd build/out
 sha256sum -c auraos-0.1.0-x86_64.iso.sha256
 ```
 
-Il faut voir `OK`. **Une compilation réussie ne garantit pas encore que l'ISO démarre** : le test suivant est obligatoire. En cas d'erreur, copiez ici le message complet avant de relancer.
+Il faut voir `OK`. **Une compilation réussie ne garantit pas encore que l'ISO démarre** : le test suivant est obligatoire.
+
+### En cas d'échec (journal complet)
+
+```bash
+sudo bash scripts/build-iso.sh --version 0.1.0 2>&1 | tee build_log.txt
+grep -iE "error|fail|abort|warn" build_log.txt | tail -n 40
+```
+
+Copiez le résultat avant de relancer : `build/out/` doit rester vide tant que le build n'a pas abouti.
 
 ## C. Tester l'ISO dans une VM VirtualBox séparée
 

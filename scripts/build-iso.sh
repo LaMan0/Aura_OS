@@ -8,6 +8,9 @@ readonly PROFILE_SRC="${REPO_ROOT}/iso/aura-profile"
 readonly BUILD_ROOT="${REPO_ROOT}/build"
 readonly WORK_DIR="${BUILD_ROOT}/work"
 readonly OUT_DIR="${BUILD_ROOT}/out"
+# Profil de référence fourni par le paquet archiso ; sert de base (paquets de
+# base + configuration des chargeurs de démarrage). Surchargeable par variable.
+readonly ARCHISO_RELENG="${ARCHISO_RELENG:-/usr/share/archiso/configs/releng}"
 
 VERSION="0.1.0"
 DRY_RUN=0
@@ -25,6 +28,12 @@ usage : sudo bash scripts/${PROG} [options]
   --publish         publication désactivée pour cette image prototype
   -h, --help        cette aide
 EOF
+}
+
+# Fusionne des listes de paquets : conserve les commentaires et déduplique les
+# paquets (la base releng d'abord, puis les ajouts AuraOS).
+merge_packages() {
+  cat "$@" | awk '!/^[[:space:]]*#/ && NF { if (seen[$0]++) next } { print }'
 }
 
 while (( $# )); do
@@ -51,6 +60,7 @@ plan() {
   cat >&2 <<EOF
 BUILD DU PROTOTYPE LIVE AURAOS
   Profil : ${PROFILE_SRC}
+  Base : ${ARCHISO_RELENG} (paquets de base + configs de démarrage)
   Staging isolé : ${STAGE_DIR}
   Sortie : ${OUT_DIR}/${ISO_NAME}
   Mode : Live XFCE basé sur Archiso ; aucun installateur ni mode gaming intégré
@@ -64,6 +74,7 @@ plan
 [[ -d "${PROFILE_SRC}" ]] || die "profil Archiso introuvable : ${PROFILE_SRC}"
 [[ -f "${PROFILE_SRC}/profiledef.sh" && -f "${PROFILE_SRC}/packages.x86_64" && -f "${PROFILE_SRC}/pacman.conf" ]] || die "profil incomplet"
 command -v mkarchiso >/dev/null 2>&1 || die "outil manquant : mkarchiso (paquet Arch : archiso)"
+[[ -d "${ARCHISO_RELENG}" ]] || die "profil releng d'archiso introuvable : ${ARCHISO_RELENG} (installez le paquet archiso)"
 
 # Ensure destructive cleanup remains confined to the repository build directory.
 [[ "${BUILD_ROOT}" == "${REPO_ROOT}/build" && "${BUILD_ROOT}" != "/" ]] || die "chemin de build inattendu"
@@ -72,12 +83,30 @@ rm -rf -- "${STAGE_DIR}" "${WORK_DIR}"
 mkdir -p "${STAGE_DIR}" "${WORK_DIR}"
 cp -a "${PROFILE_SRC}/." "${STAGE_DIR}/"
 
+# Compléter le profil avec la base fournie par le paquet archiso : les fichiers
+# de démarrage (syslinux/efiboot) et la liste des paquets de base (noyau,
+# mkinitcpio-archiso, base, etc.). Cela évite les erreurs « boot mode » et
+# « no kernel » et garde le profil cohérent avec la version installée d'archiso.
+for bootdir in syslinux efiboot grub; do
+  if [[ -d "${ARCHISO_RELENG}/${bootdir}" && ! -e "${STAGE_DIR}/${bootdir}" ]]; then
+    cp -a "${ARCHISO_RELENG}/${bootdir}" "${STAGE_DIR}/${bootdir}"
+    log "config de démarrage copiée depuis releng : ${bootdir}/"
+  fi
+done
+[[ -d "${STAGE_DIR}/syslinux" ]] || die "syslinux/ absent (requis par bios.syslinux)"
+[[ -d "${STAGE_DIR}/efiboot" ]]  || die "efiboot/ absent (requis par uefi.systemd-boot)"
+
+merge_packages "${ARCHISO_RELENG}/packages.x86_64" "${PROFILE_SRC}/packages.x86_64" \
+  > "${STAGE_DIR}/packages.x86_64"
+log "liste des paquets fusionnée (base releng + ajouts AuraOS)"
+
 # Copy runtime utilities only into the disposable staging profile.
-install -d "${STAGE_DIR}/airootfs/usr/lib/aura/bin" "${STAGE_DIR}/airootfs/etc/aura"
+install -d "${STAGE_DIR}/airootfs/usr/lib/aura/bin" "${STAGE_DIR}/airootfs/etc/aura" "${STAGE_DIR}/airootfs/etc"
 install -m 0755 "${REPO_ROOT}/scripts/aura-perf-detect" "${STAGE_DIR}/airootfs/usr/lib/aura/bin/"
 install -m 0755 "${REPO_ROOT}/scripts/aura-update" "${STAGE_DIR}/airootfs/usr/lib/aura/bin/"
 install -m 0755 "${REPO_ROOT}/scripts/aura-run" "${STAGE_DIR}/airootfs/usr/lib/aura/bin/"
 install -m 0644 "${REPO_ROOT}/etc/aura/aura.conf" "${REPO_ROOT}/etc/aura/update.conf" "${STAGE_DIR}/airootfs/etc/aura/"
+install -m 0644 "${PROFILE_SRC}/pacman.conf" "${STAGE_DIR}/airootfs/etc/pacman.conf"
 install -d "${STAGE_DIR}/airootfs/usr/local/bin"
 install -m 0755 "${PROFILE_SRC}/airootfs/usr/local/bin/aura-live-info" \
   "${STAGE_DIR}/airootfs/usr/local/bin/aura-live-info"

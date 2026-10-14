@@ -1,4 +1,7 @@
-# Paquets additionnels au profil officiel Archiso releng.
+# Paquets additionnels AuraOS.
+# Le script de build fusionne ce fichier avec packages.x86_64 du profil releng
+# d'archiso (qui apporte base, linux, mkinitcpio-archiso, firmware, etc.).
+# N'indiquez ici que ce qui n'est pas déjà dans releng.
 # Image prototype Live : bureau de test, pas de pile gaming complète.
 xfce4
 lightdm
@@ -8,9 +11,5 @@ xorg-server
 virtualbox-guest-utils
 syslinux
 memtest86+
-edk2-shell
 memtest86+-efi
-syslinux
-memtest86+
 edk2-shell
-memtest86+-efi
