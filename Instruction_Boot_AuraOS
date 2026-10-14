@@ -44,6 +44,12 @@ référence installé par le paquet `archiso` (`/usr/share/archiso/configs/relen
 - il fusionne la liste des paquets de base (noyau `linux`, `mkinitcpio-archiso`,
   `base`…) avec les ajouts AuraOS (XFCE, LightDM, NetworkManager…).
 
+Une ligne `#!remove <paquet>` dans [packages.x86_64](iso/aura-profile/packages.x86_64)
+retire un paquet de la base releng. C'est utilisé pour remplacer
+`virtualbox-guest-utils-nox` (fourni par releng) par `virtualbox-guest-utils`
+(variante avec support X11), car les deux sont **incompatibles** : sans cette
+ligne, pacman échoue avec `unresolvable package conflicts detected`.
+
 Le build prend 10 à 20 minutes et télécharge des paquets. Il écrit dans
 `build/out/` et ne modifie pas le profil source. Vérifiez les fichiers :
 
@@ -63,6 +69,17 @@ grep -iE "error|fail|abort|warn" build_log.txt | tail -n 40
 ```
 
 Copiez le résultat avant de relancer : `build/out/` doit rester vide tant que le build n'a pas abouti.
+
+Erreurs courantes et interprétation :
+
+- `unresolvable package conflicts detected` (ex. `virtualbox-guest-utils-nox` vs
+  `virtualbox-guest-utils`) : conflit de variantes, à résoudre avec `#!remove` ;
+- `Enter a selection (default=all)` / `Enter a number (default=1)` : ce ne sont
+  **pas** des erreurs, mkarchiso répond automatiquement (`--noconfirm`) ;
+- `Resolving timed out` / `failed retrieving file … .db` : problème réseau ou
+  miroir momentané, relancez ; vérifiez `/etc/pacman.d/mirrorlist` ;
+- `Cannot change permissions of '…/etc/shadow'` : avertissement bénin (le fichier
+  n'existe pas dans l'arborescence source), sans conséquence sur l'ISO.
 
 ## C. Tester l'ISO dans une VM VirtualBox séparée
 

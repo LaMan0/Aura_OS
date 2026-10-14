@@ -24,6 +24,8 @@ iso/aura-profile/
 
 Paquets ajoutés au profil `releng` : XFCE, LightDM, greeter GTK, NetworkManager, Xorg et les utilitaires invités VirtualBox. La base Archiso apporte notamment noyau, firmware et mécanismes Live.
 
+Le script de build fusionne les deux listes de paquets. Une ligne `#!remove <paquet>` dans `packages.x86_64` retire un paquet de la base releng : c'est le cas de `virtualbox-guest-utils-nox`, remplacé par `virtualbox-guest-utils` (variante X11) car les deux variantes sont incompatibles dans pacman.
+
 ## Construction
 
 À faire dans une installation Arch Linux dédiée (par exemple une VM de build séparée sur Windows). Installez `archiso`, puis depuis la racine du dépôt :

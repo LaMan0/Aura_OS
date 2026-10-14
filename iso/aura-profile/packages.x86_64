@@ -1,15 +1,17 @@
 # Paquets additionnels AuraOS.
 # Le script de build fusionne ce fichier avec packages.x86_64 du profil releng
-# d'archiso (qui apporte base, linux, mkinitcpio-archiso, firmware, etc.).
+# d'archiso (qui apporte base, linux, mkinitcpio-archiso, firmware, syslinux,
+# memtest86+, edk2-shell, etc.).
 # N'indiquez ici que ce qui n'est pas déjà dans releng.
+# Une ligne « #!remove <paquet> » retire ce paquet de la base releng : utile pour
+# remplacer une variante (voir virtualbox-guest-utils ci-dessous).
 # Image prototype Live : bureau de test, pas de pile gaming complète.
 xfce4
 lightdm
 lightdm-gtk-greeter
 networkmanager
 xorg-server
+#!remove virtualbox-guest-utils-nox
+# releng fournit la variante sans X11 (-nox) ; on la remplace par la variante
+# complète pour l'intégration VirtualBox (redimensionnement, presse-papiers).
 virtualbox-guest-utils
-syslinux
-memtest86+
-memtest86+-efi
-edk2-shell

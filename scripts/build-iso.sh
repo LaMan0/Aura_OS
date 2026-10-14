@@ -32,8 +32,34 @@ EOF
 
 # Fusionne des listes de paquets : conserve les commentaires et déduplique les
 # paquets (la base releng d'abord, puis les ajouts AuraOS).
+# Une ligne « #!remove <paquet> » dans le fichier d'ajouts retire ce paquet de la
+# base releng : indispensable pour remplacer une variante par une autre (ex.
+# virtualbox-guest-utils-nox -> virtualbox-guest-utils, sinon conflit pacman).
 merge_packages() {
-  cat "$@" | awk '!/^[[:space:]]*#/ && NF { if (seen[$0]++) next } { print }'
+  local base="$1" additions="$2"
+  awk -v base="${base}" '
+    FILENAME == base { lines[++n] = $0; next }
+    /^[[:space:]]*#![[:space:]]*remove[[:space:]]+/ {
+      p = $0
+      sub(/^[[:space:]]*#![[:space:]]*remove[[:space:]]+/, "", p)
+      sub(/[[:space:]]+$/, "", p)
+      if (p != "") removed[p] = 1
+      next
+    }
+    { lines[++n] = $0 }
+    END {
+      for (i = 1; i <= n; i++) {
+        s = lines[i]
+        t = s
+        sub(/^[[:space:]]+/, "", t)
+        sub(/[[:space:]]+$/, "", t)
+        if (t == "" || t ~ /^#/) { print s; continue }
+        if (t in removed) continue
+        if (seen[t]++) continue
+        print t
+      }
+    }
+  ' "${base}" "${additions}"
 }
 
 while (( $# )); do
@@ -99,6 +125,12 @@ done
 merge_packages "${ARCHISO_RELENG}/packages.x86_64" "${PROFILE_SRC}/packages.x86_64" \
   > "${STAGE_DIR}/packages.x86_64"
 log "liste des paquets fusionnée (base releng + ajouts AuraOS)"
+# Contrôle : la variante VirtualBox retenue ne doit pas laisser les deux variantes
+# incompatibles dans la liste fusionnée (cause du conflit pacman observé).
+if grep -qx 'virtualbox-guest-utils' "${STAGE_DIR}/packages.x86_64" \
+   && grep -qx 'virtualbox-guest-utils-nox' "${STAGE_DIR}/packages.x86_64"; then
+  die "liste fusionnée incohérente : virtualbox-guest-utils et -nox cohabitent"
+fi
 
 # Copy runtime utilities only into the disposable staging profile.
 install -d "${STAGE_DIR}/airootfs/usr/lib/aura/bin" "${STAGE_DIR}/airootfs/etc/aura" "${STAGE_DIR}/airootfs/etc"
