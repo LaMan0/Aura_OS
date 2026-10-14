@@ -14,4 +14,5 @@ file_permissions=(
   ["/etc/shadow"]="0:0:400"
   ["/root"]="0:0:750"
   ["/usr/local/bin/aura-live-info"]="0:0:755"
+  ["/usr/local/bin/aura-set-wallpaper"]="0:0:755"
 )

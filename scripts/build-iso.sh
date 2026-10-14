@@ -62,6 +62,33 @@ merge_packages() {
   ' "${base}" "${additions}"
 }
 
+# Donne une identité AuraOS aux écrans de démarrage hérités du profil releng.
+# Les entrées portent sinon les étiquettes « Arch Linux install medium » : on
+# réécrit uniquement le texte visible, sans toucher aux noms de fichiers, aux
+# binaires EFI ni aux lignes de commande du noyau.
+brand_boot_configs() {
+  local dir f
+  for dir in "${STAGE_DIR}/syslinux" "${STAGE_DIR}/efiboot"; do
+    [[ -d "${dir}" ]] || continue
+    while IFS= read -r -d '' f; do
+      sed -i -E \
+        -e 's/Arch Linux install medium/AuraOS Live/g' \
+        -e 's/Arch Linux/AuraOS/g' \
+        "$f"
+    done < <(find "${dir}" -type f \( -name '*.cfg' -o -name '*.conf' \) -print0)
+  done
+
+  # systemd-boot : laisser un court délai pour choisir une entrée au démarrage.
+  local loader="${STAGE_DIR}/efiboot/loader/loader.conf"
+  if [[ -f "${loader}" ]]; then
+    if grep -qE '^[[:space:]]*timeout' "${loader}"; then
+      sed -i -E 's/^[[:space:]]*timeout.*/timeout 15/' "${loader}"
+    else
+      printf 'timeout 15\n' >> "${loader}"
+    fi
+  fi
+}
+
 while (( $# )); do
   case "$1" in
     --version)
@@ -122,6 +149,9 @@ done
 [[ -d "${STAGE_DIR}/syslinux" ]] || die "syslinux/ absent (requis par bios.syslinux)"
 [[ -d "${STAGE_DIR}/efiboot" ]]  || die "efiboot/ absent (requis par uefi.systemd-boot)"
 
+brand_boot_configs
+log "identité de démarrage AuraOS appliquée (titres du menu de boot)"
+
 merge_packages "${ARCHISO_RELENG}/packages.x86_64" "${PROFILE_SRC}/packages.x86_64" \
   > "${STAGE_DIR}/packages.x86_64"
 log "liste des paquets fusionnée (base releng + ajouts AuraOS)"
@@ -142,6 +172,8 @@ install -m 0644 "${PROFILE_SRC}/pacman.conf" "${STAGE_DIR}/airootfs/etc/pacman.c
 install -d "${STAGE_DIR}/airootfs/usr/local/bin"
 install -m 0755 "${PROFILE_SRC}/airootfs/usr/local/bin/aura-live-info" \
   "${STAGE_DIR}/airootfs/usr/local/bin/aura-live-info"
+install -m 0755 "${REPO_ROOT}/scripts/aura-set-wallpaper" \
+  "${STAGE_DIR}/airootfs/usr/local/bin/aura-set-wallpaper"
 
 log "construction mkarchiso (cela peut prendre plusieurs minutes)"
 mkarchiso -v -w "${WORK_DIR}" -o "${OUT_DIR}" "${STAGE_DIR}"

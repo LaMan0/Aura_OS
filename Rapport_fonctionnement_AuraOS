@@ -1,21 +1,24 @@
 # Rapport_fonctionnement_AuraOS
 
-**Mise à jour : 12 octobre 2026**
+**Mise à jour : 14 octobre 2026**
 
 ## État
 
-Le dépôt dispose maintenant d'un **profil Archiso de prototype** pour tenter de produire une ISO Live Arch Linux + XFCE. Il ne s'agit pas de l'OS gaming complet. Aucun build réel ni démarrage QEMU/VirtualBox n'a encore été exécuté ou confirmé dans cet environnement Windows.
+Le dépôt dispose maintenant d'un **profil Archiso de prototype** pour produire une ISO Live Arch Linux + XFCE. Il ne s'agit pas de l'OS gaming complet.
+
+Le premier build réel a été exécuté **avec succès** dans une VM Arch Linux (archiso) : ISO d'environ 1,3 Go, `sha256sum -c` vérifié `OK`, puis démarrage Live de l'ISO dans une VM VirtualBox. Ce build et ce démarrage n'ont pas pu être rejoués dans cet environnement Windows : ils restent à reproduire après chaque modification.
 
 ## Ajouts effectués
 
 - `iso/aura-profile/` : profil Archiso, liste de paquets ajoutés, configuration réseau/LightDM, ouverture automatique d'une session `aura`, message de préversion.
-- `scripts/build-iso.sh` : staging séparé du profil source, nettoyage limité à `build/`, publication désactivée et production d'un hash SHA-256 après le build.
+- `scripts/build-iso.sh` : fusion des paquets avec le profil `releng` d'archiso (directive `#!remove`, déduplication), copie des configurations de démarrage `syslinux`/`efiboot`, application de l'identité AuraOS aux titres du menu, staging séparé du profil source, nettoyage limité à `build/`, publication désactivée et production d'un hash SHA-256 après le build.
+- **Identité AuraOS** : `/etc/os-release`, `/etc/issue`, `/etc/hostname` (`auraos`), fond d'écran `auraos-wallpaper.svg` appliqué à l'ouverture de session par `scripts/aura-set-wallpaper`. Ces éléments sont purement cosmétiques.
 - `iso/README-iso.md` : périmètre réel et étapes de test.
 - `Instruction_Boot_AuraOS` : parcours proposé avec VM de build Linux et VM VirtualBox de test séparée.
 
 ## Limites et risques restants
 
-1. **Non construit / non démarré** : le profil et les configurations doivent être vérifiés avec la version actuelle d'Archiso. La réussite du build et le boot UEFI/BIOS restent à démontrer sur une VM Linux.
+1. **Rebuild à valider** : le build a réussi une fois, mais les corrections d'identité n'ont pas encore été testées en VM. Les configurations doivent être revérifiées avec la version installée d'Archiso après chaque modification.
 2. **XFCE/LightDM à valider** : l'autologin, le nom de session XFCE et les greeters dépendent des paquets/configurations Arch actuels. Vérifier en VM et corriger les messages d'erreur.
 3. **Boot UEFI/BIOS à valider** : les modes sont déclarés dans `profiledef.sh`, mais seul un test effectif peut confirmer l'amorçage avec la version utilisée d'Archiso.
 4. **Build à vérifier** : le script utilise la première ISO trouvée dans `build/out/` et la renomme selon la version. Tester le cas où le dossier contient plusieurs ISO avant de bâtir plusieurs versions. Le build exige une VM Arch Linux avec privilèges root et accès aux dépôts.
@@ -25,4 +28,4 @@ Le dépôt dispose maintenant d'un **profil Archiso de prototype** pour tenter d
 
 ## Conclusion
 
-Le prochain jalon est de construire sur une VM Arch Linux, puis de tester l'ISO dans une VM VirtualBox séparée **en Live seulement**. Tant que ces deux étapes ne sont pas documentées avec succès, l'ISO doit être considérée comme expérimentale et non confirmée bootable. Ne pas l'installer sur disque ni la flasher sur une clé de production.
+Le build fonctionne et l'ISO démarre en Live dans VirtualBox. Le prochain jalon est de **reconstruire après les corrections d'identité**, de re-tester le boot **en Live seulement** et de confirmer visuellement le bureau XFCE, le message `aura-live-info` et le fond d'écran AuraOS. L'ISO reste **expérimentale** : ne pas l'installer sur disque ni la flasher sur une clé de production.

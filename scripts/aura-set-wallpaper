@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Applique le fond d'écran AuraOS à tous les moniteurs de la session XFCE.
+# Lancé automatiquement au démarrage de session (voir /etc/skel/.config/autostart).
+# Ne bloque jamais la session : toute erreur est ignorée silencieusement.
+set -u
+
+readonly WALL="${AURAOS_WALLPAPER:-/usr/share/backgrounds/auraos/auraos-wallpaper.svg}"
+readonly STYLE=5  # 5 = « zoomé » (xfce4-desktop : image-style)
+
+[[ -r "${WALL}" ]] || exit 0
+command -v xfconf-query >/dev/null 2>&1 || exit 0
+
+# xfdesktop crée ses propriétés de fond d'écran peu après le démarrage de session.
+for _ in 1 2 3; do
+  mapfile -t props < <(xfconf-query -c xfce4-desktop -l 2>/dev/null \
+    | grep -E '/backdrop/screen[0-9]+/monitor[^/]+/workspace[0-9]+/last-image$' || true)
+  ((${#props[@]})) && break
+  sleep 1
+done
+
+# Repli si xfdesktop n'a pas encore exposé ses propriétés (noms fréquents).
+if ((${#props[@]} == 0)); then
+  props=(
+    /backdrop/screen0/monitorVirtual1/workspace0/last-image
+    /backdrop/screen0/monitorVirtual-1/workspace0/last-image
+    /backdrop/screen0/monitor0/workspace0/last-image
+  )
+fi
+
+for p in "${props[@]}"; do
+  xfconf-query -c xfce4-desktop -p "${p}" -s "${WALL}" 2>/dev/null || true
+  xfconf-query -c xfce4-desktop -p "${p%/*}/image-style" -s "${STYLE}" 2>/dev/null || true
+done
+
+exit 0

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=AuraOS Wallpaper
+Comment=Applique le fond d'écran AuraOS au démarrage de la session
+Exec=/usr/local/bin/aura-set-wallpaper
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

@@ -1,0 +1,11 @@
+NAME="AuraOS"
+PRETTY_NAME="AuraOS Live (prototype 0.1)"
+ID=auraos
+ID_LIKE=arch
+BUILD_ID=rolling
+ANSI_COLOR="38;2;124;108;255"
+HOME_URL="https://example.org/auraos"
+DOCUMENTATION_URL="https://example.org/auraos/docs"
+SUPPORT_URL="https://example.org/auraos/support"
+BUG_REPORT_URL="https://example.org/auraos/issues"
+LOGO=auraos-logo

@@ -15,3 +15,6 @@ xorg-server
 # releng fournit la variante sans X11 (-nox) ; on la remplace par la variante
 # complète pour l'intégration VirtualBox (redimensionnement, presse-papiers).
 virtualbox-guest-utils
+# Rendu du fond d'écran AuraOS (XFCE utilise gdk-pixbuf, qui a besoin de
+# librsvg pour afficher les images SVG).
+librsvg

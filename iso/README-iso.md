@@ -14,15 +14,30 @@ iso/aura-profile/
 ├── packages.x86_64
 ├── pacman.conf
 └── airootfs/
+    ├── etc/hostname
+    ├── etc/issue
+    ├── etc/os-release
     ├── etc/lightdm/lightdm.conf
     ├── etc/systemd/system/...
-    ├── etc/skel/Desktop/AuraOS-prototype.txt
     ├── etc/skel/.xinitrc
+    ├── etc/skel/.config/autostart/aura-wallpaper.desktop
+    ├── etc/skel/Desktop/AuraOS-prototype.txt
     ├── root/customize_airootfs.sh
-    └── usr/local/bin/aura-live-info
+    ├── usr/local/bin/aura-live-info
+    └── usr/share/backgrounds/auraos/auraos-wallpaper.svg
 ```
 
-Paquets ajoutés au profil `releng` : XFCE, LightDM, greeter GTK, NetworkManager, Xorg et les utilitaires invités VirtualBox. La base Archiso apporte notamment noyau, firmware et mécanismes Live.
+Paquets ajoutés au profil `releng` : XFCE, LightDM, greeter GTK, NetworkManager, Xorg, `librsvg` (rendu du fond d'écran SVG) et les utilitaires invités VirtualBox. La base Archiso apporte notamment noyau, firmware et mécanismes Live.
+
+## Identité AuraOS
+
+Le profil `releng` fournit les écrans de démarrage (menu `syslinux` et `systemd-boot`) mais les étiquette « Arch Linux install medium ». Le script de construction réécrit ces titres en « AuraOS Live » après la copie (`brand_boot_configs`), sans toucher aux binaires EFI ni aux lignes de commande du noyau. Le reste de l'identité est porté par l'airootfs :
+
+- `/etc/os-release` → `NAME="AuraOS"`, `ID=auraos`, `ID_LIKE=arch` ;
+- `/etc/issue` et `/etc/hostname` (`auraos`) ;
+- fond d'écran `auraos-wallpaper.svg`, appliqué à l'ouverture de session par `/usr/local/bin/aura-set-wallpaper` (entrée autostart dans `/etc/skel`).
+
+Ces éléments restent **cosmétiques** : ils ne modifient ni la pile logicielle ni le périmètre fonctionnel du prototype.
 
 Le script de build fusionne les deux listes de paquets. Une ligne `#!remove <paquet>` dans `packages.x86_64` retire un paquet de la base releng : c'est le cas de `virtualbox-guest-utils-nox`, remplacé par `virtualbox-guest-utils` (variante X11) car les deux variantes sont incompatibles dans pacman.
 
